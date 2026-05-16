@@ -35,6 +35,12 @@ public class SpecterServerApplication {
     }
 
     @Bean
+    public ProjectRegistry projectRegistry() {
+        Path cacheDir = Path.of(".specter-cache").toAbsolutePath();
+        return new ProjectRegistry(cacheDir);
+    }
+
+    @Bean
     public ApplicationRunner analysisRunner(
             SpecterAnalysisEngine engine,
             @Value("${specter.source.root:./src}") String sourceRootPath,

@@ -114,6 +114,20 @@
                 <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
                 <version>${spring-ai.version}</version>
             </dependency>
+
+            <!-- Jackson Databind (for graph serialization and persistence) -->
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>2.19.0</version>
+            </dependency>
+
+            <!-- SnakeYAML for properties/YAML parsing -->
+            <dependency>
+                <groupId>org.yaml</groupId>
+                <artifactId>snakeyaml</artifactId>
+                <version>2.4</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
