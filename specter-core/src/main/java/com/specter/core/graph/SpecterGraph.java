@@ -1,5 +1,7 @@
 package com.specter.core.graph;
 
+import com.specter.core.persistence.GraphSerializer;
+
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
@@ -125,11 +127,10 @@ public class SpecterGraph {
     }
 
     public void saveToFile(Path outputPath) throws IOException {
-        // Delegated to GraphSerializer
+        GraphSerializer.saveToFile(this, outputPath);
     }
 
     public static SpecterGraph loadFromFile(Path inputPath) throws IOException {
-        // Delegated to GraphSerializer
-        return new SpecterGraph();
+        return GraphSerializer.loadFromFile(inputPath);
     }
 }

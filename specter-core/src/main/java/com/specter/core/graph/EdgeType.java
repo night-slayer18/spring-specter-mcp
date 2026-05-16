@@ -24,5 +24,9 @@ public enum EdgeType {
     TESTS,
     MOCKS,
     DEPENDS_ON,
-    OVERRIDES
+    OVERRIDES,
+    MEASURES,
+    TRACES,
+    PERFORMANCE_RISK,
+    SCHEMA_MAPS_TO
 }
