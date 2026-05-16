@@ -4,7 +4,6 @@ import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
-import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.MemberValuePair;
 import com.github.javaparser.ast.expr.NormalAnnotationExpr;
 import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr;
@@ -143,6 +142,21 @@ public class DatabaseSchemaResolver implements FrameworkResolver {
                 String colName = alterMatcher.group(2);
                 entry.columns().add(tableName + "." + colName);
                 tableColumns.computeIfAbsent(tableName, k -> new LinkedHashSet<>()).add(colName);
+            }
+
+            Matcher addColMatcher = XML_ADD_COLUMN.matcher(content);
+            while (addColMatcher.find()) {
+                String tableName = addColMatcher.group(1).toLowerCase();
+                tableToMigration.putIfAbsent(tableName, migrationId);
+                entry.tables().add(tableName);
+                // Extract column names within <addColumn> blocks
+                String addColBlock = addColMatcher.group(0);
+                Matcher innerCol = XML_COLUMN.matcher(addColBlock);
+                while (innerCol.find()) {
+                    entry.columns().add(tableName + "." + innerCol.group(1));
+                    tableColumns.computeIfAbsent(tableName, k -> new LinkedHashSet<>())
+                            .add(innerCol.group(1));
+                }
             }
 
         } catch (IOException e) {

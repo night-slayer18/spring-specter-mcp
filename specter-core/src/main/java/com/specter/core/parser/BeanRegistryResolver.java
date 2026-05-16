@@ -51,14 +51,9 @@ public class BeanRegistryResolver implements FrameworkResolver {
 
     private final BeanRegistry registry;
     private final Set<String> activeProfiles;
-    private final Path sourceRoot;
-    private final Path classesRoot;
 
-    public BeanRegistryResolver(BeanRegistry registry, Path sourceRoot,
-                                Path classesRoot, Set<String> activeProfiles) {
+    public BeanRegistryResolver(BeanRegistry registry, Set<String> activeProfiles) {
         this.registry = registry;
-        this.sourceRoot = sourceRoot;
-        this.classesRoot = classesRoot;
         this.activeProfiles = Set.copyOf(activeProfiles);
     }
 

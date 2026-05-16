@@ -3,7 +3,9 @@ package com.specter.server.tools;
 import com.specter.core.SpecterAnalysisEngine;
 import com.specter.core.SpecterAnalysisEngine.*;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer;
+import com.specter.core.analysis.ArchitecturalHealthAnalyzer.DimensionScore;
 import com.specter.core.analysis.GraphDiff;
+import com.specter.core.analysis.RiskScore;
 import com.specter.core.graph.EdgeType;
 import com.specter.core.graph.NodeType;
 import com.specter.core.graph.SpecterEdge;
@@ -11,6 +13,7 @@ import com.specter.core.graph.SpecterNode;
 import com.specter.core.persistence.GraphSerializer;
 import com.specter.server.ProjectRegistry;
 import com.specter.server.ProjectRegistry.ProjectContext;
+import com.specter.server.remediation.RemediationEngine;
 import com.specter.core.provenance.GitProvenanceChecker;
 import com.specter.core.provenance.ProvenanceViolation;
 import com.specter.core.watcher.SourceChangeTracker.ChangeSet;
@@ -36,13 +39,16 @@ public class SpecterMcpTools {
     private final AtomicReference<SpecterAnalysisEngine> activeEngine;
     private final String sourceRootPath;
     private final ProjectRegistry projectRegistry;
+    private final RemediationEngine remediationEngine;
 
     public SpecterMcpTools(SpecterAnalysisEngine engine,
                             @Value("${specter.source.root:./src}") String sourceRootPath,
-                            ProjectRegistry projectRegistry) {
+                            ProjectRegistry projectRegistry,
+                            RemediationEngine remediationEngine) {
         this.activeEngine = new AtomicReference<>(engine);
         this.sourceRootPath = sourceRootPath;
         this.projectRegistry = projectRegistry;
+        this.remediationEngine = remediationEngine;
     }
 
     @Tool(name = "search_architecture",
@@ -1384,6 +1390,134 @@ public class SpecterMcpTools {
                 "sockJsFallback", "/specter-ws",
                 "allowedOrigins", "*"
         );
+    }
+
+    @Tool(name = "suggest_fix",
+          description = "Given a nodeId and issue description from get_architectural_health output, " +
+              "uses AI to generate a specific, minimal code fix for the architectural issue. " +
+              "Returns before/after code snippets and migration risk assessment. " +
+              "Example: 'suggest_fix for class:com.example.OrderController ARCH-001 violation'")
+    public Map<String, Object> suggestFix(
+            @ToolParam(description = "Node ID from the architectural health report") String nodeId,
+            @ToolParam(description = "Issue description or rule ID to fix") String issueDescription) {
+        var graph = activeEngine.get().getGraph();
+        var suggestion = remediationEngine.suggestFix(nodeId, issueDescription, graph);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("nodeId", suggestion.nodeId());
+        result.put("issue", suggestion.issue());
+        result.put("suggestion", suggestion.suggestion());
+        result.put("codeSnippets", suggestion.codeSnippets());
+        result.put("downtimeRequired", suggestion.downtimeRequired());
+        result.put("effortEstimate", suggestion.effortEstimate());
+        return result;
+    }
+
+    @Tool(name = "auto_remediate_all",
+          description = "Runs the full health check, then for each CRITICAL issue generates " +
+              "a specific code fix using AI. Returns a prioritized remediation backlog " +
+              "with effort estimates and risk levels. " +
+              "Example: generate a complete refactoring plan for the entire codebase.")
+    public Map<String, Object> autoRemediateAll() {
+        var engine = activeEngine.get();
+        var result = new LinkedHashMap<String, Object>();
+
+        ArchitecturalHealthAnalyzer healthAnalyzer = new ArchitecturalHealthAnalyzer(engine.getGraph());
+        ArchitecturalHealthAnalyzer.HealthReport health = healthAnalyzer.analyze();
+
+        result.put("overallScore", health.overallScore());
+
+        List<Map<String, Object>> backlog = new ArrayList<>();
+
+        for (DimensionScore dim : health.dimensions().values()) {
+            for (RiskScore risk : dim.criticalIssues()) {
+                var suggestion = remediationEngine.suggestFix(
+                        risk.nodeId(), risk.reason(), engine.getGraph());
+                backlog.add(Map.of(
+                        "dimension", dim.name(),
+                        "score", dim.score(),
+                        "issue", risk.reason(),
+                        "severity", risk.level().name(),
+                        "nodeId", risk.nodeId(),
+                        "suggestion", suggestion.suggestion(),
+                        "codeSnippets", suggestion.codeSnippets(),
+                        "effort", suggestion.effortEstimate()
+                ));
+            }
+        }
+
+        backlog.sort((a, b) -> Integer.compare(
+                (int) a.get("score"), (int) b.get("score")));
+
+        result.put("remediationBacklog", backlog);
+        result.put("totalIssues", backlog.size());
+        return result;
+    }
+
+    @Tool(name = "audit_native_compatibility",
+          description = "Analyzes the codebase for Spring Boot Native / GraalVM AOT compilation risks: " +
+              "reflection usage without hints, dynamic proxy creation, resource loading patterns, " +
+              "and Spring scope incompatibilities. Returns a readiness score for native compilation. " +
+              "Example: assess native compilation readiness before switching to spring-boot-starter-native.")
+    public Map<String, Object> auditNativeCompatibility() {
+        var graph = activeEngine.get().getGraph();
+        Map<String, Object> result = new LinkedHashMap<>();
+
+        List<Map<String, Object>> issues = new ArrayList<>();
+        int reflectionIssues = 0;
+        int proxyIssues = 0;
+        int resourceIssues = 0;
+        int scopeIssues = 0;
+        int lazyIssues = 0;
+        int aotFriendlyCount = 0;
+
+        for (SpecterNode node : graph.findNodesByType(NodeType.COMPATIBILITY_ISSUE)) {
+            var meta = node.metadata();
+            String issue = meta.getOrDefault("issue", "");
+            String className = meta.getOrDefault("className", "");
+            String recommendation = meta.getOrDefault("recommendation", "");
+
+            issues.add(Map.of(
+                    "nodeId", node.id(),
+                    "className", className,
+                    "issue", issue,
+                    "recommendation", recommendation
+            ));
+
+            String lower = issue.toLowerCase();
+            if (lower.contains("reflection")) reflectionIssues++;
+            if (lower.contains("proxy")) proxyIssues++;
+            if (lower.contains("resource")) resourceIssues++;
+            if (lower.contains("scope")) scopeIssues++;
+            if (lower.contains("lazy")) lazyIssues++;
+        }
+
+        for (SpecterNode node : graph.allNodes()) {
+            if ("true".equals(node.metadata().get("hasAotHints"))) {
+                aotFriendlyCount++;
+            }
+        }
+
+        int readinessScore = 100
+                - reflectionIssues * 15
+                - proxyIssues * 12
+                - resourceIssues * 8
+                - scopeIssues * 10
+                - lazyIssues * 10
+                + aotFriendlyCount * 5;
+        readinessScore = Math.max(0, Math.min(100, readinessScore));
+
+        result.put("readinessScore", readinessScore);
+        result.put("readinessLabel", readinessScore >= 80 ? "Near-ready"
+                : readinessScore >= 50 ? "Work needed" : "Not ready");
+        result.put("totalIssues", issues.size());
+        result.put("reflectionIssues", reflectionIssues);
+        result.put("proxyIssues", proxyIssues);
+        result.put("resourceIssues", resourceIssues);
+        result.put("scopeIssues", scopeIssues);
+        result.put("lazyIssues", lazyIssues);
+        result.put("aotFriendlyComponents", aotFriendlyCount);
+        result.put("issues", issues);
+        return result;
     }
 
     private String gradeScore(int score) {

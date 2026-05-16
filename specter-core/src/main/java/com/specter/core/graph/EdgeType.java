@@ -28,5 +28,6 @@ public enum EdgeType {
     MEASURES,
     TRACES,
     PERFORMANCE_RISK,
-    SCHEMA_MAPS_TO
+    SCHEMA_MAPS_TO,
+    COMPATIBILITY_RISK
 }

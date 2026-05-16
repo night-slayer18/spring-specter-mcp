@@ -39,7 +39,6 @@ public class SpecterAnalysisEngine {
     private final BeanRegistry registry;
     private AnalysisProgressListener progressListener;
 
-    private final List<FrameworkResolver> pass1Resolvers;
     private final List<FrameworkResolver> pass2Resolvers;
 
     public SpecterAnalysisEngine() throws IOException {
@@ -61,7 +60,6 @@ public class SpecterAnalysisEngine {
         this.indexSearcher = new SpecterIndexSearcher(indexWriter.getDirectory());
         this.registry = new BeanRegistry();
 
-        this.pass1Resolvers = List.of();
         this.pass2Resolvers = buildPass2Resolvers(classesRoot);
     }
 
@@ -80,6 +78,7 @@ public class SpecterAnalysisEngine {
         resolvers.add(new ObservabilityResolver(graph));
         resolvers.add(new PerformancePatternResolver(graph));
         resolvers.add(new DatabaseSchemaResolver(graph));
+        resolvers.add(new GraalVmCompatibilityResolver(graph));
         if (classesRoot != null) {
             resolvers.add(new ProxyAnalysisResolver(graph, classesRoot));
         }
@@ -98,7 +97,7 @@ public class SpecterAnalysisEngine {
 
         // ═══ Pass 1: Component Scan Simulation ═══════════════════════════
         BeanRegistryResolver scanResolver = new BeanRegistryResolver(
-                registry, sourceRoot, null, activeProfiles);
+                registry, activeProfiles);
         scanResolver.resolve(sourceRoot);
         log.info("Pass 1 complete — {} active beans registered", registry.size());
 
@@ -165,7 +164,7 @@ public class SpecterAnalysisEngine {
         for (var entry : moduleMap.entrySet()) {
             ModuleTopologyResolver.ModuleDescriptor md = entry.getValue();
             BeanRegistryResolver scanResolver = new BeanRegistryResolver(
-                    engine.registry, md.sourceRoot(), null, activeProfiles);
+                    engine.registry, activeProfiles);
             scanResolver.resolve(md.sourceRoot());
         }
         log.info("Multi-module Pass 1 complete — {} active beans registered", engine.registry.size());
@@ -346,7 +345,7 @@ public class SpecterAnalysisEngine {
                 if (!(edge instanceof SpecterEdge(var s, var target, var et) && et == EdgeType.CALLS)) continue;
 
                 graph.getNode(target).ifPresent(node -> {
-                    if (node instanceof SpecterNode(var id, var name, var nt, var metadata) && nt == NodeType.PROXY) {
+                    if (node instanceof SpecterNode(var _, var _, var nt, var metadata) && nt == NodeType.PROXY) {
                         String stereotype = metadata.getOrDefault("PROXY_STEREOTYPE", "");
                         if (stereotype.contains("TRANSACTION_INTERCEPTOR")) {
                             boundaries.add(node);
