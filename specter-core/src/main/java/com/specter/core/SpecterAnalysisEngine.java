@@ -1,5 +1,6 @@
 package com.specter.core;
 
+import com.specter.core.analysis.GraphDiff;
 import com.specter.core.graph.*;
 import com.specter.core.index.SpecterIndexSearcher;
 import com.specter.core.index.SpecterIndexWriter;
@@ -36,6 +37,7 @@ public class SpecterAnalysisEngine {
     private final SpecterIndexWriter indexWriter;
     private final SpecterIndexSearcher indexSearcher;
     private final BeanRegistry registry;
+    private AnalysisProgressListener progressListener;
 
     private final List<FrameworkResolver> pass1Resolvers;
     private final List<FrameworkResolver> pass2Resolvers;
@@ -75,6 +77,9 @@ public class SpecterAnalysisEngine {
         resolvers.add(new OpenApiResolver(graph));
         resolvers.add(new ServiceCallResolver(graph));
         resolvers.add(new TestCoverageResolver(graph));
+        resolvers.add(new ObservabilityResolver(graph));
+        resolvers.add(new PerformancePatternResolver(graph));
+        resolvers.add(new DatabaseSchemaResolver(graph));
         if (classesRoot != null) {
             resolvers.add(new ProxyAnalysisResolver(graph, classesRoot));
         }
@@ -102,6 +107,7 @@ public class SpecterAnalysisEngine {
             resolver.resolve(sourceRoot);
             log.info("{} complete — {} nodes, {} edges",
                     resolver.name(), graph.nodeCount(), graph.edgeCount());
+            notifyProgress(resolver.name(), graph.nodeCount(), graph.edgeCount());
         }
 
         // ═══ Index ═══════════════════════════════════════════════════════
@@ -109,8 +115,32 @@ public class SpecterAnalysisEngine {
         graph.allEdges().forEach(indexWriter::indexEdge);
         indexWriter.commit();
 
+        notifyComplete();
+
         log.info("Analysis complete. Graph: {} nodes, {} edges. Registry: {} beans.",
                 graph.nodeCount(), graph.edgeCount(), registry.size());
+    }
+
+    private void notifyProgress(String phase, int nodeCount, int edgeCount) {
+        AnalysisProgressListener l = progressListener;
+        if (l != null) {
+            try {
+                l.onProgress(phase, nodeCount, edgeCount);
+            } catch (Exception e) {
+                log.warn("Progress listener failed", e);
+            }
+        }
+    }
+
+    private void notifyComplete() {
+        AnalysisProgressListener l = progressListener;
+        if (l != null) {
+            try {
+                l.onComplete(graph);
+            } catch (Exception e) {
+                log.warn("Complete listener failed", e);
+            }
+        }
     }
 
     /**
@@ -147,6 +177,8 @@ public class SpecterAnalysisEngine {
                 resolver.resolve(md.sourceRoot());
                 log.info("[{}] {} complete — {} nodes, {} edges",
                         md.artifactId(), resolver.name(),
+                        engine.graph.nodeCount(), engine.graph.edgeCount());
+                engine.notifyProgress(resolver.name(),
                         engine.graph.nodeCount(), engine.graph.edgeCount());
             }
         }
@@ -430,8 +462,20 @@ public class SpecterAnalysisEngine {
                 .collect(Collectors.toList());
     }
 
+    public void setProgressListener(AnalysisProgressListener listener) {
+        this.progressListener = listener;
+    }
+
     public SpecterGraph getGraph() { return graph; }
     public BeanRegistry getRegistry() { return registry; }
+
+    /**
+     * Captures the current graph state as a named snapshot for future
+     * comparison via {@link GraphDiff#diff}.
+     */
+    public GraphDiff.GraphSnapshot snapshot(String label) {
+        return GraphDiff.fromGraph(graph, label);
+    }
 
     private String findNodeIdByClassName(String className) {
         String exactId = "class:" + className;
