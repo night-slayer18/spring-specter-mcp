@@ -134,6 +134,7 @@ public class WebMvcResolver implements FrameworkResolver {
             NormalAnnotationExpr normal = ann.asNormalAnnotationExpr();
             for (MemberValuePair pair : normal.getPairs()) {
                 String key = pair.getNameAsString();
+                if (!pair.getValue().isStringLiteralExpr()) continue;
                 String val = pair.getValue().asStringLiteralExpr()
                         .asString();
                 switch (key) {
@@ -145,7 +146,9 @@ public class WebMvcResolver implements FrameworkResolver {
             }
         } else if (ann.isSingleMemberAnnotationExpr()) {
             SingleMemberAnnotationExpr single = ann.asSingleMemberAnnotationExpr();
-            path = single.getMemberValue().asStringLiteralExpr().asString();
+            if (single.getMemberValue().isStringLiteralExpr()) {
+                path = single.getMemberValue().asStringLiteralExpr().asString();
+            }
         }
 
         if (path.isEmpty()) path = "/";
@@ -172,13 +175,16 @@ public class WebMvcResolver implements FrameworkResolver {
                 if (ann.isNormalAnnotationExpr()) {
                     for (MemberValuePair pair : ann.asNormalAnnotationExpr().getPairs()) {
                         String key = pair.getNameAsString();
-                        if ("value".equals(key) || "path".equals(key)) {
+                        if (("value".equals(key) || "path".equals(key))
+                                && pair.getValue().isStringLiteralExpr()) {
                             return pair.getValue().asStringLiteralExpr().asString();
                         }
                     }
                 } else if (ann.isSingleMemberAnnotationExpr()) {
-                    return ann.asSingleMemberAnnotationExpr()
-                            .getMemberValue().asStringLiteralExpr().asString();
+                    var val = ann.asSingleMemberAnnotationExpr().getMemberValue();
+                    if (val.isStringLiteralExpr()) {
+                        return val.asStringLiteralExpr().asString();
+                    }
                 }
             }
         }

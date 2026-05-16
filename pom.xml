@@ -26,11 +26,11 @@
 
         <spring-boot.version>3.5.0</spring-boot.version>
         <spring-ai.version>1.0.7</spring-ai.version>
-        <lombok.version>1.18.38</lombok.version>
-        <javaparser.version>3.26.3</javaparser.version>
-        <lucene.version>9.12.1</lucene.version>
+        <lombok.version>1.18.46</lombok.version>
+        <javaparser.version>3.28.1</javaparser.version>
+        <lucene.version>10.4.0</lucene.version>
         <jgit.version>6.10.0.202406032230-r</jgit.version>
-        <asm.version>9.7.1</asm.version>
+        <asm.version>9.10</asm.version>
     </properties>
 
     <dependencyManagement>
@@ -119,14 +119,14 @@
             <dependency>
                 <groupId>com.fasterxml.jackson.core</groupId>
                 <artifactId>jackson-databind</artifactId>
-                <version>2.19.0</version>
+                <version>2.21.3</version>
             </dependency>
 
             <!-- SnakeYAML for properties/YAML parsing -->
             <dependency>
                 <groupId>org.yaml</groupId>
                 <artifactId>snakeyaml</artifactId>
-                <version>2.4</version>
+                <version>2.6</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

@@ -28,7 +28,7 @@ public class SpecterIndexWriter {
     public SpecterIndexWriter() throws IOException {
         this.indexDirectory = new ByteBuffersDirectory();
         IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
-        config.setOpenMode(IndexWriterConfig.OpenMode.CREATE);
+        config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
         this.writer = new IndexWriter(indexDirectory, config);
     }
 
@@ -73,6 +73,16 @@ public class SpecterIndexWriter {
         } catch (IOException e) {
             log.warn("Failed to index edge: {} -> {}", edge.sourceId(), edge.targetId(), e);
         }
+    }
+
+    /**
+     * Wipes the index so a fresh rebuild can begin. Call this before re-indexing
+     * on incremental analysis or profile changes to avoid duplicate documents.
+     */
+    public void clearIndex() throws IOException {
+        writer.deleteAll();
+        writer.commit();
+        log.debug("Lucene index cleared");
     }
 
     public void commit() {

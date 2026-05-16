@@ -24,10 +24,7 @@ jobs:
           cache: 'maven'
 
       - name: Build and Verify (Maven)
-        run: mvn clean verify --batch-mode --no-transfer-progress
-
-      - name: Ensure Code Formats and Models Compile
-        run: mvn compile -pl specter-core,specter-server
+        run: mvn clean install --batch-mode --no-transfer-progress
 
   architecture-gate:
     runs-on: ubuntu-latest
@@ -47,54 +44,22 @@ jobs:
           cache: 'maven'
 
       - name: Build Project
-        run: mvn clean compile --batch-mode --no-transfer-progress
-
-      - name: Start Specter Server (HTTP mode)
-        env:
-          SPECTER_SOURCE_ROOT: ${{ github.workspace }}
-          SPRING_PROFILES_ACTIVE: http
-        run: |
-          mvn -pl specter-server spring-boot:run \
-            -Dspring-boot.run.arguments="--specter.source.root=${{ github.workspace }}" &
-          echo "Waiting for Specter to start..."
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8765/specter/api/v1/graph/summary > /dev/null 2>&1; then
-              echo "Specter is up"
-              break
-            fi
-            sleep 2
-          done
+        run: mvn install -DskipTests --batch-mode --no-transfer-progress
 
       - name: Run Architecture Gate
         run: |
-          HEALTH=$(curl -s http://localhost:8765/specter/api/v1/health)
-          SCORE=$(echo "$HEALTH" | jq -r '.overallScore')
-          VIOLATIONS=$(curl -s "http://localhost:8765/specter/api/v1/graph/export?format=json" | \
-            jq '[.edges[] | select(.type == "INJECTS") |
-              select(any(.nodes[]; select(.type == "REPOSITORY"); .id == .targetId) and
-                     any(.nodes[]; select(.type == "CONTROLLER"); .id == .sourceId))] | length')
-
-          echo "Overall Health Score: $SCORE"
-          echo "Architecture Violations: $VIOLATIONS"
-
-          if [ "$SCORE" -lt 65 ]; then
-            echo "::error::Architecture health score $SCORE is below threshold 65"
-            exit 1
-          fi
-
-          if [ "$VIOLATIONS" -gt 0 ]; then
-            echo "::error::$VIOLATIONS direct controller→repository injections detected (ARCH-001 violation)"
-            exit 1
-          fi
-
-          echo "Architecture gate passed — score: $SCORE/100"
+          mvn test -pl specter-server \
+            -Dtest=ArchitectureGateTest \
+            -Dspecter.source.root="${{ github.workspace }}"
 
       - name: Upload Architecture Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: architecture-report
-          path: .specter-cache/
+          path: |
+            .specter-cache/health-report.json
+            .specter-cache/snapshots/
           retention-days: 30
 
   pr-comment:
@@ -116,34 +81,30 @@ jobs:
           cache: 'maven'
 
       - name: Build Project
-        run: mvn clean compile --batch-mode --no-transfer-progress
+        run: mvn install -DskipTests --batch-mode --no-transfer-progress
 
-      - name: Start Specter Server (HTTP mode)
-        env:
-          SPECTER_SOURCE_ROOT: ${{ github.workspace }}
-          SPRING_PROFILES_ACTIVE: http
+      - name: Generate Health Report
         run: |
-          mvn -pl specter-server spring-boot:run \
-            -Dspring-boot.run.arguments="--specter.source.root=${{ github.workspace }}" &
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8765/specter/api/v1/graph/summary > /dev/null 2>&1; then
-              echo "Specter is up"
-              break
-            fi
-            sleep 2
-          done
+          mvn test -pl specter-server \
+            -Dtest=ArchitectureGateTest \
+            -Dspecter.source.root="${{ github.workspace }}" || true
 
       - name: Post Architecture Report to PR
         uses: actions/github-script@v7
         with:
           script: |
-            const { execSync } = require('child_process');
-            const health = JSON.parse(execSync(
-              'curl -s http://localhost:8765/specter/api/v1/health'
-            ).toString());
+            const fs = require('fs');
+            const reportPath = '.specter-cache/health-report.json';
+
+            if (!fs.existsSync(reportPath)) {
+              console.log('No health report found at ' + reportPath);
+              return;
+            }
+
+            const health = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
 
             const dimensionRows = Object.entries(health.dimensions || {})
-              .map(([key, d]) => `| ${d.name} | ${d.score}/100 |`)
+              .map(([, d]) => `| ${d.name} | ${d.score}/100 |`)
               .join('\n');
 
             const criticalSection = health.criticalIssues && health.criticalIssues.length > 0
@@ -159,6 +120,7 @@ jobs:
             const body = `## 👻 Spring-Specter Architecture Report ${emoji}
 
             **Overall Score**: ${health.overallScore}/100
+            **Graph**: ${health.nodeCount} nodes, ${health.edgeCount} edges
 
             | Dimension | Score |
             |-----------|-------|

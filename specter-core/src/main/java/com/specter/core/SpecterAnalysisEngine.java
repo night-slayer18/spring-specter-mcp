@@ -110,6 +110,7 @@ public class SpecterAnalysisEngine {
         }
 
         // ═══ Index ═══════════════════════════════════════════════════════
+        indexWriter.clearIndex();
         indexWriter.indexNodes(graph.allNodes());
         graph.allEdges().forEach(indexWriter::indexEdge);
         indexWriter.commit();
@@ -234,6 +235,7 @@ public class SpecterAnalysisEngine {
     }
 
     private void reindex() throws IOException {
+        indexWriter.clearIndex();
         indexWriter.indexNodes(graph.allNodes());
         graph.allEdges().forEach(indexWriter::indexEdge);
         indexWriter.commit();
