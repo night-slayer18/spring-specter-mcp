@@ -4,7 +4,7 @@
 [![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.5+-brightgreen.svg)](https://spring.io/projects/spring-boot)
 [![MCP Protocol](https://img.shields.io/badge/MCP-Enabled-purple.svg)](https://modelcontextprotocol.io/)
 [![WebSocket](https://img.shields.io/badge/WebSocket-STOMP-orange.svg)](https://stomp.github.io/)
-[![Anthropic](https://img.shields.io/badge/AI_Remediation-Claude_3.7-red.svg)](https://anthropic.com/)
+[![Anthropic](https://img.shields.io/badge/AI_Remediation-Claude_Sonnet_4-red.svg)](https://anthropic.com/)
 
 **Spring-Specter** is a framework-aware Model Context Protocol (MCP) server built for AI Coding Agents (Claude, Cline, Command Code). Unlike generic AST parsers that only see surface-level syntax trees, Specter acts as a **Runtime Context Simulator** — utilizing JavaParser, ASM Bytecode Analysis, and an embedded Apache Lucene index to map the invisible runtime architecture of Spring Boot applications directly to AI agents.
 
@@ -69,7 +69,7 @@ graph TD
 
 ### AI-Powered Remediation (Phase 17)
 
-- **RemediationEngine** calls Claude 3.7 Sonnet via Anthropic API
+- **RemediationEngine** calls Claude Sonnet 4 via Anthropic API
 - Generates specific before/after code fixes with downtime assessments and effort estimates
 - API only invoked when tools are explicitly called — never during analysis passes
 
@@ -79,7 +79,7 @@ graph TD
 - Flags `@Lazy`, non-singleton scopes incompatible with native compilation
 - Positive detection of `@RegisterReflectionForBinding` / `@ImportRuntimeHints`
 
-## 🚀 43 MCP Tools
+## 🚀 41 MCP Tools
 
 ### Core Graph Query (7 tools)
 | Tool | Description |
@@ -92,14 +92,38 @@ graph TD
 | `analyze_dependency_cycle()` | DFS cycle detection over INJECTS edges with cycle path output |
 | `get_graph_summary()` | Node/edge type breakdowns, active bean count |
 
-### Security & Routing (3 tools)
+### Security & Audit (5 tools)
 | Tool | Description |
 |------|-------------|
 | `get_api_surface()` | Every `@RequestMapping` endpoint with HTTP verb, path, produces/consumes |
-| `get_extraneous_endpoints()` | Endpoints not covered by any `SecurityFilterChain` |
-| `analyze_proxy_chain(class)` | Full CGLIB/JDK proxy delegation chain for any intercepted bean |
+| `audit_security_boundaries()` | Checks for missing `@PreAuthorize`, unsecured endpoints, CORS gaps |
+| `get_security_filter_chain()` | Full Spring Security filter chain with URL patterns and access rules |
+| `find_undocumented_endpoints()` | Endpoints not covered by any OpenAPI spec annotation |
+| `audit_git_provenance()` | GPG key expiry, SSH signature compliance, merge attestation verification |
 
-### Observability & Performance (6 tools)
+### Topology & Dependencies (5 tools)
+| Tool | Description |
+|------|-------------|
+| `get_service_topology(class)` | Full call graph — CALLS/INJECTS/PUBLISHES/SUBSCRIBES edges for a service |
+| `get_module_dependency_graph()` | Inter-module dependency graph — Maven multi-module awareness |
+| `find_cross_module_violations()` | Edge crossings that violate module layering rules |
+| `get_dto_lineage(class)` | Traces a DTO from creation through transformations across services |
+| `refresh_analysis()` | Re-run full analysis pass on the current source root |
+
+### Configuration & Properties (2 tools)
+| Tool | Description |
+|------|-------------|
+| `trace_config_property(key)` | End-to-end trace of a config property from source through injection |
+| `audit_undefined_properties()` | `@Value`-referenced properties with no definition in any config source |
+
+### Testing & Resilience (3 tools)
+| Tool | Description |
+|------|-------------|
+| `get_test_coverage_map()` | Maps test classes to production components via abstract interpretation |
+| `find_untested_components()` | Components with no corresponding test class |
+| `find_resilience_gaps()` | Missing `@Retryable`, no `@CircuitBreaker`, single-threaded risks |
+
+### Observability & Performance (5 tools)
 | Tool | Description |
 |------|-------------|
 | `get_observability_map()` | All METRIC/TRACE_SPAN/HEALTH_INDICATOR nodes mapped to production components |
@@ -108,7 +132,7 @@ graph TD
 | `find_performance_antipatterns()` | N+1 hotspots, missing transactions, eager-loaded `@OneToMany` |
 | `analyze_transaction_scope(class)` | Full transactional call tree — distributed transaction risks |
 
-### Architecture Rules & Governance (4 tools)
+### Architecture Rules & Governance (5 tools)
 | Tool | Description |
 |------|-------------|
 | `evaluate_architecture_rules()` | 5 built-in rules + custom rules — CONTROLLER→REPOSITORY, messaging misuse, etc. |
@@ -123,13 +147,13 @@ graph TD
 | `correlate_entity_schema()` | Entity↔Table cross-reference — finds missing tables, missing columns, orphan schemas |
 | `get_migration_timeline()` | Ordered Flyway/Liquibase migration history with tables/columns per migration |
 
-### Multi-Project & Streaming (5 tools)
+### Multi-Project & Streaming (4 tools)
 | Tool | Description |
 |------|-------------|
 | `switch_project(path, sourceRoot)` | Hot-swap analysis context without restart |
 | `list_projects()` | All cached project contexts |
+| `register_project(name, path)` | Register a new project for the multi-project registry |
 | `get_websocket_endpoint()` | WebSocket URL + topic descriptions for real-time subscriptions |
-| `set_active_profiles(profiles)` | Switch active Spring profiles for `@Profile`-aware analysis |
 
 ### AI Remediation (2 tools)
 | Tool | Description |
@@ -137,23 +161,19 @@ graph TD
 | `suggest_fix(nodeId, issue)` | Claude-generated specific code fix with before/after snippets + downtime risk |
 | `auto_remediate_all()` | Full health check → prioritized remediation backlog with effort estimates |
 
-### Provenance & Native (5 tools)
+### Provenance & Native (1 tool)
 | Tool | Description |
 |------|-------------|
-| `audit_provenance()` | GPG key expiry, SSH signature compliance, merge attestation verification |
 | `audit_native_compatibility()` | GraalVM readiness score — reflection/proxy/resource/scoping risk breakdown |
-| `find_bean_by_name(name)` | Exact bean lookup with full metadata |
-| `get_conditional_bean_report()` | Beans gated behind `@ConditionalOn*` with their active/inactive status |
-| `get_transaction_boundary_report()` | All transactional boundaries across the entire graph |
 
 ## 🏗 Architecture
 
 ```
 spring-specter-mcp/
-├── specter-core/                    # Graph engine + 14 resolvers
+├── specter-core/                    # Graph engine + 16 resolvers
 │   └── src/main/java/com/specter/core/
 │       ├── graph/                   # 30 NodeTypes, 24 EdgeTypes, SpecterGraph
-│       ├── parser/                  # 14 FrameworkResolvers
+│       ├── parser/                  # 16 FrameworkResolvers
 │       │   ├── BeanRegistryResolver          # Pass 1: @ComponentScan
 │       │   ├── SpringDependencyResolver       # @Autowired/@Qualifier
 │       │   ├── AopProxyResolver              # @Aspect proxy rewiring
@@ -164,7 +184,7 @@ spring-specter-mcp/
 │       │   ├── SecurityFilterChainResolver    # Security boundary mapping
 │       │   ├── ConfigurationPropertiesResolver # Config injection tracing
 │       │   ├── OpenApiResolver               # OpenAPI spec correlation
-│       │   ├── ServiceCallResolver           # REST/Feign/gRPC call mapping
+│       │   ├── ServiceCallResolver           # REST/Feign call mapping
 │       │   ├── TestCoverageResolver          # Test→component coverage
 │       │   ├── ObservabilityResolver         # Metrics/tracing/logging
 │       │   ├── PerformancePatternResolver    # N+1, missing transactions
@@ -181,7 +201,7 @@ spring-specter-mcp/
 ├── specter-server/                  # MCP Server + WebSocket
 │   └── src/main/java/com/specter/server/
 │       ├── SpecterServerApplication  # Spring Boot entry point
-│       ├── tools/SpecterMcpTools     # 43 MCP tool endpoints
+│       ├── tools/SpecterMcpTools     # 41 MCP tool endpoints
 │       ├── streaming/                # WebSocket STOMP (GraphChangePublisher, WebSocketConfig)
 │       └── remediation/              # AI-powered fix generation (RemediationEngine)
 │
@@ -190,15 +210,18 @@ spring-specter-mcp/
 
 ## 🩺 7-Dimension Health Scoring
 
-| Dimension | What It Measures | Weight |
-|-----------|-----------------|--------|
-| **DEPENDENCY_HEALTH** | Circular INJECTS edges, layering violations, excessive fan-out | Service isolation |
-| **SECURITY_HEALTH** | Unsecured endpoints, missing `@PreAuthorize`, filter coverage gaps | Attack surface |
-| **RESILIENCE_HEALTH** | No `@Retryable`, no `@CircuitBreaker`, single points of failure | Fault tolerance |
-| **TEST_HEALTH** | Service/controller nodes with no TESTS edges, uncovered REST endpoints | Regression safety |
-| **OBSERVABILITY_HEALTH** | Unmetered services, missing traces, no HealthIndicator for repositories | Production visibility |
-| **CONTRACT_HEALTH** | OpenAPI spec coverage, endpoint documentation gaps | API governance |
-| **ARCHITECTURE_RULES_HEALTH** | ARCH-001 to ARCH-005 + custom rule violations | Layered architecture enforcement |
+Health is scored 0–100 using equal-weighted dimension averages. Each dimension
+is computed independently and contributes equally to the overall score.
+
+| Dimension | What It Measures |
+|-----------|-----------------|
+| **DEPENDENCY_HEALTH** | Circular INJECTS edges, layering violations, excessive fan-out |
+| **SECURITY_HEALTH** | Unsecured endpoints, missing `@PreAuthorize`, filter coverage gaps |
+| **RESILIENCE_HEALTH** | No `@Retryable`, no `@CircuitBreaker`, single points of failure |
+| **TEST_HEALTH** | Service/controller nodes with no TESTS edges, uncovered REST endpoints |
+| **OBSERVABILITY_HEALTH** | Unmetered services, missing traces, no HealthIndicator for repositories |
+| **CONTRACT_HEALTH** | OpenAPI spec coverage, endpoint documentation gaps |
+| **ARCHITECTURE_RULES_HEALTH** | ARCH-001 to ARCH-005 standard rule violations (custom rules not included) |
 
 ## 📦 Building & Running
 

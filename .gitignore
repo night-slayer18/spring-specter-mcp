@@ -20,3 +20,6 @@ Thumbs.db
 *.csv
 *.sql.gz
 mock-data/*.json
+
+# Specter analysis cache
+.specter-cache/

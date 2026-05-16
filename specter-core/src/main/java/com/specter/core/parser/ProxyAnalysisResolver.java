@@ -87,7 +87,7 @@ public class ProxyAnalysisResolver implements FrameworkResolver {
             String proxyNodeId = "proxy:" + proxyClassName;
             String targetNodeId = "class:" + targetClassName;
 
-            SpecterNode proxyNode = SpecterNode.of(proxyNodeId, proxyClassName, NodeType.COMPONENT)
+            SpecterNode proxyNode = SpecterNode.of(proxyNodeId, proxyClassName, NodeType.PROXY)
                     .withMetadata("proxyType", visitor.proxyType)
                     .withMetadata("targetClass", targetClassName)
                     .withMetadata("classFile", classFile.toString());

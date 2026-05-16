@@ -55,6 +55,15 @@ public class PerformancePatternResolver implements FrameworkResolver {
         serviceReturnTypes.clear();
         serviceCallCount.clear();
 
+        // Pass 1: collect entity class names only
+        try (Stream<Path> javaFiles = Files.walk(sourceRoot)) {
+            javaFiles
+                .filter(Files::isRegularFile)
+                .filter(p -> p.toString().endsWith(".java"))
+                .forEach(this::collectEntityNamesOnly);
+        }
+
+        // Pass 2: full performance analysis with complete entity list
         try (Stream<Path> javaFiles = Files.walk(sourceRoot)) {
             javaFiles
                 .filter(Files::isRegularFile)
@@ -64,6 +73,19 @@ public class PerformancePatternResolver implements FrameworkResolver {
 
         resolveCacheableGaps();
         log.info("Performance pattern detection complete");
+    }
+
+    private void collectEntityNamesOnly(Path file) {
+        try {
+            CompilationUnit cu = StaticJavaParser.parse(file);
+            cu.findAll(ClassOrInterfaceDeclaration.class).forEach(cls -> {
+                String className = cls.getFullyQualifiedName()
+                        .orElse(cls.getNameAsString());
+                detectEntityType(cls, className);
+            });
+        } catch (IOException e) {
+            log.debug("Failed to parse for entity detection: {}", file, e);
+        }
     }
 
     private void resolveFile(Path file) {

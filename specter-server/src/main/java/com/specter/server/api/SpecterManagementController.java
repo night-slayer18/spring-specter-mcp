@@ -2,9 +2,12 @@ package com.specter.server.api;
 
 import com.specter.core.SpecterAnalysisEngine;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer;
+import com.specter.server.streaming.GraphChangePublisher;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -17,9 +20,12 @@ import java.util.*;
 public class SpecterManagementController {
 
     private final SpecterAnalysisEngine engine;
+    private final GraphChangePublisher publisher;
 
-    public SpecterManagementController(SpecterAnalysisEngine engine) {
+    public SpecterManagementController(SpecterAnalysisEngine engine,
+                                        GraphChangePublisher publisher) {
         this.engine = engine;
+        this.publisher = publisher;
     }
 
     @PostMapping("/analyze")
@@ -61,6 +67,7 @@ public class SpecterManagementController {
     public Map<String, Object> getHealth() {
         ArchitecturalHealthAnalyzer analyzer = new ArchitecturalHealthAnalyzer(engine.getGraph());
         var report = analyzer.analyze();
+        publisher.publishHealthUpdate(report);
         return Map.of(
                 "overallScore", report.overallScore(),
                 "dimensions", report.dimensions().entrySet().stream()
@@ -74,7 +81,22 @@ public class SpecterManagementController {
     }
 
     @GetMapping(value = "/analysis/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public String streamAnalysis() {
-        return "data: {\"status\":\"ready\"}\n\n";
+    public SseEmitter streamAnalysis() {
+        SseEmitter emitter = new SseEmitter(5 * 60 * 1000L);
+
+        try {
+            Map<String, Object> status = new LinkedHashMap<>();
+            status.put("status", "connected");
+            status.put("nodes", engine.getGraph().nodeCount());
+            status.put("edges", engine.getGraph().edgeCount());
+            status.put("activeBeans", engine.getRegistry().size());
+            emitter.send(SseEmitter.event()
+                    .name("status")
+                    .data(status));
+        } catch (IOException e) {
+            emitter.completeWithError(e);
+        }
+
+        return emitter;
     }
 }

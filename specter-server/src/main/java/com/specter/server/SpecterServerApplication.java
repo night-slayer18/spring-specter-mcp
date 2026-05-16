@@ -1,6 +1,7 @@
 package com.specter.server;
 
 import com.specter.core.SpecterAnalysisEngine;
+import com.specter.core.analysis.ArchitecturalHealthAnalyzer;
 import com.specter.server.streaming.GraphChangePublisher;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
@@ -63,6 +64,12 @@ public class SpecterServerApplication {
                     engine.getGraph().nodeCount(),
                     engine.getGraph().edgeCount(),
                     engine.getRegistry().size());
+
+            ArchitecturalHealthAnalyzer healthAnalyzer =
+                    new ArchitecturalHealthAnalyzer(engine.getGraph());
+            var report = healthAnalyzer.analyze();
+            publisher.publishHealthUpdate(report);
+            log.info("Published initial health score: {}", report.overallScore());
         };
     }
 

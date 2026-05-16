@@ -6,19 +6,28 @@ import com.specter.core.graph.SpecterNode;
 
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Supplier;
 
 /**
  * Evaluates architecture rules against the live {@link SpecterGraph}.
  * Rules are edge-type constraints between node types and never mutate
  * the graph — they only produce {@link RuleViolation} records.
+ *
+ * <p>When constructed with a {@link Supplier}, the graph is resolved
+ * lazily at evaluation time — allowing the rule engine to follow
+ * project context switches without re-instantiation.
  */
 public class ArchitectureRuleEngine {
 
-    private final SpecterGraph graph;
+    private final Supplier<SpecterGraph> graphSupplier;
     private final List<ArchitectureRule> customRules = new CopyOnWriteArrayList<>();
 
     public ArchitectureRuleEngine(SpecterGraph graph) {
-        this.graph = graph;
+        this(() -> graph);
+    }
+
+    public ArchitectureRuleEngine(Supplier<SpecterGraph> graphSupplier) {
+        this.graphSupplier = graphSupplier;
     }
 
     /**
@@ -35,6 +44,7 @@ public class ArchitectureRuleEngine {
      * Evaluates a specific set of rules.
      */
     public List<RuleViolation> evaluate(List<ArchitectureRule> rules) {
+        SpecterGraph graph = graphSupplier.get();
         List<RuleViolation> violations = new ArrayList<>();
 
         for (ArchitectureRule rule : rules) {

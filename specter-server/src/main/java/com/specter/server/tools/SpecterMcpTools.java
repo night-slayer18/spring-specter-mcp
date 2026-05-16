@@ -2,6 +2,9 @@ package com.specter.server.tools;
 
 import com.specter.core.SpecterAnalysisEngine;
 import com.specter.core.SpecterAnalysisEngine.*;
+import com.specter.core.rules.ArchitectureRuleEngine;
+import com.specter.core.rules.ArchitectureRule;
+import com.specter.core.rules.RuleViolation;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer.DimensionScore;
 import com.specter.core.analysis.GraphDiff;
@@ -25,7 +28,6 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -37,6 +39,7 @@ import lombok.extern.slf4j.Slf4j;
 public class SpecterMcpTools {
 
     private final AtomicReference<SpecterAnalysisEngine> activeEngine;
+    private final ArchitectureRuleEngine ruleEngine;
     private final String sourceRootPath;
     private final ProjectRegistry projectRegistry;
     private final RemediationEngine remediationEngine;
@@ -46,6 +49,7 @@ public class SpecterMcpTools {
                             ProjectRegistry projectRegistry,
                             RemediationEngine remediationEngine) {
         this.activeEngine = new AtomicReference<>(engine);
+        this.ruleEngine = new ArchitectureRuleEngine(() -> activeEngine.get().getGraph());
         this.sourceRootPath = sourceRootPath;
         this.projectRegistry = projectRegistry;
         this.remediationEngine = remediationEngine;
@@ -804,10 +808,11 @@ public class SpecterMcpTools {
     }
 
     @Tool(name = "get_architectural_health",
-            description = "Computes a comprehensive architectural health score (0-100) across 6 dimensions: " +
-                    "dependency health, security, resilience, test coverage, observability, and API contract quality. " +
-                    "Returns dimension scores, critical issues, and prioritized remediation recommendations. " +
-                    "Example: get a single dashboard view of your architecture's overall health.")
+            description = "Computes a comprehensive architectural health score (0-100) across 7 dimensions: " +
+                    "dependency health, security, resilience, test coverage, observability, API contract quality, " +
+                    "and architecture rule compliance. Custom rules added via add_custom_rule are not factored " +
+                    "into the health score — only standard rules contribute. " +
+                    "Returns dimension scores, critical issues, and prioritized remediation recommendations.")
     public Map<String, Object> getArchitecturalHealth() {
         ArchitecturalHealthAnalyzer analyzer = new ArchitecturalHealthAnalyzer(activeEngine.get().getGraph());
         var report = analyzer.analyze();
@@ -938,10 +943,7 @@ public class SpecterMcpTools {
               "and security boundary breaches. Returns violations with severity and rationale. " +
               "Example: enforce clean architecture boundaries automatically on every PR.")
     public Map<String, Object> evaluateArchitectureRules() {
-        var graph = activeEngine.get().getGraph();
-        com.specter.core.rules.ArchitectureRuleEngine engine =
-                new com.specter.core.rules.ArchitectureRuleEngine(graph);
-        var violations = engine.evaluate();
+        var violations = ruleEngine.evaluate();
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("totalViolations", violations.size());
@@ -1005,13 +1007,10 @@ public class SpecterMcpTools {
             return Map.of("error", true, "message", "Unknown node type: " + targetType);
         }
 
-        var rule = new com.specter.core.rules.ArchitectureRule(
+        var rule = new ArchitectureRule(
                 ruleId, description, severity, edgeType, srcType, tgtType, rationale);
 
-        var graph = activeEngine.get().getGraph();
-        com.specter.core.rules.ArchitectureRuleEngine engine =
-                new com.specter.core.rules.ArchitectureRuleEngine(graph);
-        engine.addCustomRule(rule);
+        ruleEngine.addCustomRule(rule);
 
         return Map.of("added", true, "ruleId", ruleId, "description", description);
     }
@@ -1026,7 +1025,7 @@ public class SpecterMcpTools {
             var graph = activeEngine.get().getGraph();
             GraphDiff.GraphSnapshot snapshot = activeEngine.get().snapshot(label);
 
-            Path snapshotsDir = Paths.get(sourceRootPath, ".specter-cache", "snapshots");
+            Path snapshotsDir = resolveProjectRoot().resolve(".specter-cache/snapshots");
             Files.createDirectories(snapshotsDir);
             Path snapshotFile = snapshotsDir.resolve(label + ".json");
 
@@ -1056,7 +1055,7 @@ public class SpecterMcpTools {
             @ToolParam(description = "Label of the 'before' snapshot") String beforeLabel,
             @ToolParam(description = "Label of the 'after' snapshot (or 'current' for live graph)") String afterLabel) {
         try {
-            Path snapshotsDir = Paths.get(sourceRootPath, ".specter-cache", "snapshots");
+            Path snapshotsDir = resolveProjectRoot().resolve(".specter-cache/snapshots");
             var liveGraph = activeEngine.get().getGraph();
 
             GraphDiff.GraphSnapshot before = loadSnapshot(snapshotsDir, beforeLabel);
@@ -1104,7 +1103,7 @@ public class SpecterMcpTools {
     public List<Map<String, Object>> listSnapshots() {
         List<Map<String, Object>> snapshots = new ArrayList<>();
         try {
-            Path snapshotsDir = Paths.get(sourceRootPath, ".specter-cache", "snapshots");
+            Path snapshotsDir = resolveProjectRoot().resolve(".specter-cache/snapshots");
             if (!Files.exists(snapshotsDir)) return snapshots;
 
             try (var files = Files.list(snapshotsDir)) {
@@ -1211,67 +1210,93 @@ public class SpecterMcpTools {
             classNodeId = classNode.id();
         }
 
-        List<Map<String, Object>> transactionalMethods = new ArrayList<>();
-        List<Map<String, Object>> nonTransactionalMethods = new ArrayList<>();
-
-        for (SpecterNode methodNode : graph.allNodes()) {
-            if (!methodNode.id().startsWith("method:" + className + ".")) continue;
-
-            Map<String, Object> methodInfo = new LinkedHashMap<>();
-            methodInfo.put("methodId", methodNode.id());
-            methodInfo.put("methodName", methodNode.name());
-
-            List<String> calledServices = new ArrayList<>();
-            List<String> calledRepositories = new ArrayList<>();
-            List<String> remoteCalls = new ArrayList<>();
-
-            for (SpecterEdge edge : graph.getOutgoingEdges(methodNode.id())) {
-                if (edge.type() == EdgeType.CALLS) {
-                    graph.getNode(edge.targetId()).ifPresent(target -> {
-                        if (target.type() == NodeType.SERVICE) calledServices.add(target.name());
-                        if (target.type() == NodeType.REPOSITORY
-                                || target.type() == NodeType.DATA_REPOSITORY) {
-                            calledRepositories.add(target.name());
-                        }
-                    });
-                }
-                if (edge.type() == EdgeType.CALLS_REMOTE) {
-                    graph.getNode(edge.targetId()).ifPresent(target ->
-                            remoteCalls.add(target.name()));
-                }
+        // Find proxy nodes that wrap this class
+        List<SpecterNode> wrappingProxies = new ArrayList<>();
+        boolean isTransactional = false;
+        for (SpecterEdge edge : graph.allEdges()) {
+            if (edge.type() == EdgeType.CALLS && edge.targetId().equals(classNodeId)) {
+                graph.getNode(edge.sourceId()).ifPresent(source -> {
+                    if (source.type() == NodeType.PROXY) {
+                        wrappingProxies.add(source);
+                    }
+                });
             }
-
-            methodInfo.put("calledServices", calledServices);
-            methodInfo.put("calledRepositories", calledRepositories);
-            methodInfo.put("remoteCalls", remoteCalls);
-
-            boolean isTransactional = "TRANSACTION_INTERCEPTOR".equals(
-                    methodNode.metadata().get("PROXY_STEREOTYPE"));
-            methodInfo.put("transactional", isTransactional);
-
-            if (isTransactional) {
-                transactionalMethods.add(methodInfo);
-            } else {
-                nonTransactionalMethods.add(methodInfo);
+        }
+        for (SpecterNode proxy : wrappingProxies) {
+            String stereotype = proxy.metadata().getOrDefault("PROXY_STEREOTYPE", "");
+            if (stereotype.contains("TRANSACTION_INTERCEPTOR")) {
+                isTransactional = true;
+                break;
             }
         }
 
-        result.put("transactionalMethods", transactionalMethods);
-        result.put("nonTransactionalMethods", nonTransactionalMethods);
+        result.put("isTransactional", isTransactional);
 
-        boolean hasRemoteInTransaction = transactionalMethods.stream()
-                .anyMatch(m -> !((List<?>) m.get("remoteCalls")).isEmpty());
-        result.put("distributedTransactionRisk", hasRemoteInTransaction);
+        // BFS traversal to map transaction scope
+        List<Map<String, Object>> calledServices = new ArrayList<>();
+        List<Map<String, Object>> calledRepositories = new ArrayList<>();
+        List<Map<String, Object>> remoteCalls = new ArrayList<>();
+        List<Map<String, Object>> exceptionTypes = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>();
 
-        if (hasRemoteInTransaction) {
-            List<String> riskyMethods = new ArrayList<>();
-            for (Map<String, Object> m : transactionalMethods) {
-                List<?> remotes = (List<?>) m.get("remoteCalls");
-                if (!remotes.isEmpty()) {
-                    riskyMethods.add((String) m.get("methodName"));
+        visited.add(classNodeId);
+        queue.add(classNodeId);
+
+        while (!queue.isEmpty()) {
+            String currentId = queue.poll();
+
+            for (SpecterEdge edge : graph.getOutgoingEdges(currentId)) {
+                SpecterNode targetNode = graph.getNode(edge.targetId()).orElse(null);
+                if (targetNode == null) continue;
+
+                if (edge.type() == EdgeType.CALLS) {
+                    Map<String, Object> callInfo = new LinkedHashMap<>();
+                    callInfo.put("name", targetNode.name());
+                    callInfo.put("id", targetNode.id());
+
+                    if (targetNode.type() == NodeType.SERVICE) {
+                        calledServices.add(callInfo);
+                        if (visited.add(edge.targetId())) {
+                            queue.add(edge.targetId());
+                        }
+                    } else if (targetNode.type() == NodeType.REPOSITORY
+                            || targetNode.type() == NodeType.DATA_REPOSITORY) {
+                        calledRepositories.add(callInfo);
+                    } else if (targetNode.type() == NodeType.PROXY) {
+                        if (visited.add(edge.targetId())) {
+                            queue.add(edge.targetId());
+                        }
+                    }
+
+                } else if (edge.type() == EdgeType.CALLS_REMOTE) {
+                    Map<String, Object> remoteInfo = new LinkedHashMap<>();
+                    remoteInfo.put("name", targetNode.name());
+                    remoteInfo.put("id", targetNode.id());
+                    remoteInfo.put("protocol",
+                            targetNode.metadata().getOrDefault("protocol", "unknown"));
+                    remoteCalls.add(remoteInfo);
+
+                } else if (edge.type() == EdgeType.THROWS) {
+                    Map<String, Object> exInfo = new LinkedHashMap<>();
+                    exInfo.put("exceptionType", targetNode.name());
+                    exInfo.put("id", targetNode.id());
+                    exceptionTypes.add(exInfo);
                 }
             }
-            result.put("riskyTransactionScopes", riskyMethods);
+        }
+
+        result.put("calledServices", calledServices);
+        result.put("calledRepositories", calledRepositories);
+        result.put("remoteCalls", remoteCalls);
+        result.put("exceptionTypes", exceptionTypes);
+
+        boolean distributedTransactionRisk = isTransactional && !remoteCalls.isEmpty();
+        result.put("distributedTransactionRisk", distributedTransactionRisk);
+
+        if (distributedTransactionRisk) {
+            result.put("riskDetail", "Remote calls detected inside @Transactional scope — "
+                    + "risk of distributed transaction inconsistency");
         }
 
         result.put("hasPerformanceIssues",
@@ -1534,6 +1559,17 @@ public class SpecterMcpTools {
         m.put("name", node.name());
         m.put("type", node.type().name());
         return m;
+    }
+
+    private Path resolveProjectRoot() {
+        Path p = Path.of(sourceRootPath).toAbsolutePath();
+        while (p != null && !Files.exists(p.resolve("pom.xml"))
+                && !Files.exists(p.resolve("build.gradle"))) {
+            Path parent = p.getParent();
+            if (parent == null) break;
+            p = parent;
+        }
+        return p;
     }
 
     private int findLayer(List<String> layers, String moduleName) {
