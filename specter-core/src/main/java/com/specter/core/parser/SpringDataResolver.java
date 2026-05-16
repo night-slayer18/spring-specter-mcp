@@ -3,7 +3,11 @@ package com.specter.core.parser;
 import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.FieldDeclaration;
+import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.AnnotationExpr;
+import com.github.javaparser.ast.expr.MemberValuePair;
+import com.github.javaparser.ast.expr.StringLiteralExpr;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.specter.core.graph.*;
 
@@ -147,21 +151,85 @@ public class SpringDataResolver implements FrameworkResolver {
         if (!hasPersistenceAnnotation && !(hasIdAnnotation || hasIdMethod)) return;
 
         String entityNodeId = "persistence_entity:" + className;
-        if (graph.getNode(entityNodeId).isPresent()) return; // already captured via repo
+        boolean existing = graph.getNode(entityNodeId).isPresent();
 
-        String technology = detectTechnologyFromAnnotations(cls);
+        if (!existing) {
+            String technology = detectTechnologyFromAnnotations(cls);
+            SpecterNode entityNode = SpecterNode.of(entityNodeId, className, NodeType.PERSISTENCE_ENTITY)
+                    .withMetadata("sourceFile", file.toString())
+                    .withMetadata("technology", technology);
+            graph.addNode(entityNode);
+        }
 
-        SpecterNode entityNode = SpecterNode.of(entityNodeId, className, NodeType.PERSISTENCE_ENTITY)
-                .withMetadata("sourceFile", file.toString())
-                .withMetadata("technology", technology);
-        graph.addNode(entityNode);
+        resolveRelationalEdges(cls, className, entityNodeId);
+    }
+
+    /**
+     * Scans entity fields for {@code @OneToMany} and {@code @ManyToOne}
+     * annotations, drawing {@link EdgeType#HAS_MANY} and
+     * {@link EdgeType#BELONGS_TO} edges to the target entity nodes.
+     */
+    private void resolveRelationalEdges(ClassOrInterfaceDeclaration cls,
+                                         String sourceClassName,
+                                         String sourceNodeId) {
+        for (FieldDeclaration field : cls.getFields()) {
+            for (VariableDeclarator var : field.getVariables()) {
+                for (AnnotationExpr ann : field.getAnnotations()) {
+                    String annName = ann.getNameAsString();
+                    EdgeType edgeType = switch (annName) {
+                        case "OneToMany" -> EdgeType.HAS_MANY;
+                        case "ManyToOne" -> EdgeType.BELONGS_TO;
+                        default -> null;
+                    };
+                    if (edgeType == null) continue;
+
+                    String targetType = extractTargetType(var);
+                    if (targetType == null) {
+                        targetType = extractMappedByTarget(ann);
+                    }
+                    if (targetType == null) continue;
+
+                    String targetNodeId = "persistence_entity:" + targetType;
+                    if (edgeType == EdgeType.HAS_MANY) {
+                        graph.addEdge(sourceNodeId, targetNodeId, EdgeType.HAS_MANY);
+                    } else {
+                        graph.addEdge(sourceNodeId, targetNodeId, EdgeType.BELONGS_TO);
+                    }
+                }
+            }
+        }
+    }
+
+    private String extractTargetType(VariableDeclarator var) {
+        String typeName = var.getTypeAsString();
+        // Strip collection/generic wrappers: List<Order> → Order
+        int angleStart = typeName.indexOf('<');
+        int angleEnd = typeName.lastIndexOf('>');
+        if (angleStart >= 0 && angleEnd > angleStart) {
+            typeName = typeName.substring(angleStart + 1, angleEnd).trim();
+        }
+        // Strip array suffix
+        if (typeName.endsWith("[]")) {
+            typeName = typeName.substring(0, typeName.length() - 2);
+        }
+        return typeName.contains(".") ? typeName.substring(typeName.lastIndexOf('.') + 1) : typeName;
+    }
+
+    private String extractMappedByTarget(AnnotationExpr ann) {
+        if (!ann.isNormalAnnotationExpr()) return null;
+        for (MemberValuePair pair : ann.asNormalAnnotationExpr().getPairs()) {
+            if ("mappedBy".equals(pair.getNameAsString())) {
+                return pair.getValue().asStringLiteralExpr().asString();
+            }
+        }
+        return null;
     }
 
     private String detectTechnologyFromAnnotations(ClassOrInterfaceDeclaration cls) {
         for (AnnotationExpr ann : cls.getAnnotations()) {
             String name = ann.getNameAsString();
             if ("Document".equals(name)) return "mongodb";
-            if ("Entity".equals(name)) return "jpa"; // JPA is default for @Entity
+            if ("Entity".equals(name)) return "jpa";
             if ("Table".equals(name)) return "jpa";
             if ("Persistent".equals(name)) return "jdo";
         }

@@ -65,6 +65,7 @@ public class SpecterAnalysisEngine {
         List<FrameworkResolver> resolvers = new ArrayList<>();
         resolvers.add(new SpringDependencyResolver(graph, registry));
         resolvers.add(new AopProxyResolver(graph, registry));
+        resolvers.add(new WebMvcResolver(graph));
         resolvers.add(new SpringDataResolver(graph));
         resolvers.add(new MessagingResolver(graph));
         if (classesRoot != null) {

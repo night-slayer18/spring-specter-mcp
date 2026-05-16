@@ -9,5 +9,8 @@ public enum EdgeType {
     IMPLEMENTS,
     EXTENDS,
     ANNOTATED_WITH,
-    CONTAINS
+    CONTAINS,
+    ROUTES_TO,
+    HAS_MANY,
+    BELONGS_TO
 }

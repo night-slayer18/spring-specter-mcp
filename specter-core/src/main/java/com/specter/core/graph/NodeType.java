@@ -2,6 +2,7 @@ package com.specter.core.graph;
 
 public enum NodeType {
     CONTROLLER,
+    CONTROLLER_ENDPOINT,
     SERVICE,
     REPOSITORY,
     COMPONENT,
