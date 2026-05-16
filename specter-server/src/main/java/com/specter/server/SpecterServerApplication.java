@@ -1,6 +1,7 @@
 package com.specter.server;
 
 import com.specter.core.SpecterAnalysisEngine;
+import com.specter.server.streaming.GraphChangePublisher;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
@@ -43,6 +44,7 @@ public class SpecterServerApplication {
     @Bean
     public ApplicationRunner analysisRunner(
             SpecterAnalysisEngine engine,
+            GraphChangePublisher publisher,
             @Value("${specter.source.root:./src}") String sourceRootPath,
             @Value("${specter.active.profiles:}") String activeProfilesCsv) {
         return args -> {
@@ -53,6 +55,7 @@ public class SpecterServerApplication {
                 return;
             }
             Set<String> activeProfiles = parseProfiles(activeProfilesCsv);
+            engine.setProgressListener(publisher);
             log.info("Pre-warming analysis engine from: {} (profiles: {})",
                     sourceRoot, activeProfiles);
             engine.analyze(sourceRoot, activeProfiles);
