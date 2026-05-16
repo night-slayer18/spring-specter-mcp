@@ -1,15 +1,18 @@
 package com.specter.core.analysis;
 
 import com.specter.core.graph.*;
+import com.specter.core.rules.ArchitectureRuleEngine;
+import com.specter.core.rules.RuleViolation;
 
 import java.util.*;
 
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Computes a composite architectural health score across 6 dimensions:
+ * Computes a composite architectural health score across 7 dimensions:
  * dependency health, security, resilience, test coverage, observability,
- * and API contract quality. Each dimension scores 0-100.
+ * API contract quality, and architecture rule compliance.
+ * Each dimension scores 0-100.
  */
 @Slf4j
 public class ArchitecturalHealthAnalyzer {
@@ -27,6 +30,7 @@ public class ArchitecturalHealthAnalyzer {
         DimensionScore testHealth = computeTestHealth();
         DimensionScore observabilityHealth = computeObservabilityHealth();
         DimensionScore contractHealth = computeContractHealth();
+        DimensionScore architectureRulesHealth = computeArchitectureRulesHealth();
 
         Map<String, DimensionScore> dimensions = new LinkedHashMap<>();
         dimensions.put("DEPENDENCY_HEALTH", dependencyHealth);
@@ -35,11 +39,13 @@ public class ArchitecturalHealthAnalyzer {
         dimensions.put("TEST_HEALTH", testHealth);
         dimensions.put("OBSERVABILITY_HEALTH", observabilityHealth);
         dimensions.put("CONTRACT_HEALTH", contractHealth);
+        dimensions.put("ARCHITECTURE_RULES_HEALTH", architectureRulesHealth);
 
         int overall = (int) Math.round(
                 dependencyHealth.score() + securityHealth.score()
                 + resilienceHealth.score() + testHealth.score()
-                + observabilityHealth.score() + contractHealth.score()) / 6;
+                + observabilityHealth.score() + contractHealth.score()
+                + architectureRulesHealth.score()) / 7;
 
         List<RiskScore> criticalIssues = new ArrayList<>();
         for (DimensionScore ds : dimensions.values()) {
@@ -54,16 +60,47 @@ public class ArchitecturalHealthAnalyzer {
     private DimensionScore computeDependencyHealth() {
         int score = 100;
         List<RiskScore> issues = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        Set<String> inStack = new HashSet<>();
+        List<List<String>> allCycles = new ArrayList<>();
 
-        List<SpecterNode> allNodes = new ArrayList<>(graph.allNodes());
-        for (SpecterEdge edge : graph.allEdges()) {
-            if (edge.type() == EdgeType.INJECTS && edge.sourceId().equals(edge.targetId())) {
-                score = Math.max(0, score - 20);
-                issues.add(RiskScore.circularDependency(edge.sourceId()));
+        for (SpecterNode node : graph.allNodes()) {
+            if (!visited.contains(node.id())) {
+                dfsFindCycles(node.id(), visited, inStack, new LinkedList<>(), allCycles);
             }
         }
 
+        for (List<String> cycle : allCycles) {
+            score = Math.max(0, score - 20);
+            issues.add(RiskScore.circularDependency(String.join(" → ", cycle)));
+        }
+
         return new DimensionScore("DEPENDENCY_HEALTH", Math.max(0, score), issues);
+    }
+
+    private void dfsFindCycles(String nodeId, Set<String> visited, Set<String> inStack,
+                                LinkedList<String> path, List<List<String>> cycles) {
+        visited.add(nodeId);
+        inStack.add(nodeId);
+        path.addLast(nodeId);
+
+        for (SpecterEdge edge : graph.getOutgoingEdges(nodeId)) {
+            if (edge.type() != EdgeType.INJECTS) continue;
+            String target = edge.targetId();
+            if (!visited.contains(target)) {
+                dfsFindCycles(target, visited, inStack, path, cycles);
+            } else if (inStack.contains(target)) {
+                int cycleStart = path.indexOf(target);
+                if (cycleStart >= 0) {
+                    List<String> cycle = new ArrayList<>(path.subList(cycleStart, path.size()));
+                    cycle.add(target);
+                    cycles.add(cycle);
+                }
+            }
+        }
+
+        path.removeLast();
+        inStack.remove(nodeId);
     }
 
     private DimensionScore computeSecurityHealth() {
@@ -129,8 +166,88 @@ public class ArchitecturalHealthAnalyzer {
     }
 
     private DimensionScore computeObservabilityHealth() {
-        int score = 80;
-        return new DimensionScore("OBSERVABILITY_HEALTH", score, List.of());
+        int score = 100;
+        List<RiskScore> issues = new ArrayList<>();
+
+        Set<String> serviceControllerIds = new HashSet<>();
+        for (SpecterNode node : graph.allNodes()) {
+            if (node.type() == NodeType.SERVICE || node.type() == NodeType.CONTROLLER) {
+                serviceControllerIds.add(node.id());
+            }
+        }
+
+        if (serviceControllerIds.isEmpty()) {
+            return new DimensionScore("OBSERVABILITY_HEALTH", 100, issues);
+        }
+
+        for (String nodeId : serviceControllerIds) {
+            boolean hasMeasures = false;
+            boolean hasTraces = false;
+            boolean hasMeterRegistry = "true".equals(
+                    graph.getNode(nodeId).map(n -> n.metadata().get("hasMeterRegistry")).orElse("false"));
+            boolean instrumented = "true".equals(
+                    graph.getNode(nodeId).map(n -> n.metadata().get("instrumented")).orElse("false"));
+
+            for (SpecterEdge edge : graph.getOutgoingEdges(nodeId)) {
+                if (edge.type() == EdgeType.MEASURES) hasMeasures = true;
+                if (edge.type() == EdgeType.TRACES) hasTraces = true;
+            }
+
+            if (!hasMeasures && !hasTraces) {
+                score = Math.max(0, score - 8);
+                SpecterNode node = graph.getNode(nodeId).orElse(null);
+                if (node != null) {
+                    issues.add(new RiskScore(nodeId,
+                            node.name() + " has no metrics and no tracing instrumentation",
+                            8, RiskScore.RiskLevel.MEDIUM));
+                }
+            }
+
+            if (!hasMeterRegistry && !instrumented) {
+                score = Math.max(0, score - 5);
+                SpecterNode node = graph.getNode(nodeId).orElse(null);
+                if (node != null) {
+                    issues.add(new RiskScore(nodeId,
+                            node.name() + " has no @Timed and no MeterRegistry injection",
+                            5, RiskScore.RiskLevel.MEDIUM));
+                }
+            }
+        }
+
+        List<SpecterNode> healthIndicators = graph.findNodesByType(NodeType.HEALTH_INDICATOR);
+        for (SpecterNode repo : graph.findNodesByType(NodeType.DATA_REPOSITORY)) {
+            boolean hasHealthIndicator = false;
+            for (SpecterNode hi : healthIndicators) {
+                if (graph.getOutgoingEdges(repo.id()).stream()
+                        .anyMatch(e -> e.targetId().equals(hi.id()) && e.type() == EdgeType.IMPLEMENTS)) {
+                    hasHealthIndicator = true;
+                    break;
+                }
+            }
+            if (!hasHealthIndicator) {
+                score = Math.max(0, score - 10);
+                issues.add(new RiskScore(repo.id(),
+                        repo.name() + " has no HealthIndicator",
+                        10, RiskScore.RiskLevel.HIGH));
+            }
+        }
+
+        for (SpecterEdge edge : graph.allEdges()) {
+            if (edge.type() != EdgeType.CALLS_REMOTE) continue;
+            String sourceId = edge.sourceId();
+            boolean hasSpanAnnotation = graph.getOutgoingEdges(sourceId).stream()
+                    .anyMatch(e -> e.type() == EdgeType.TRACES);
+            if (!hasSpanAnnotation) {
+                score = Math.max(0, score - 12);
+                graph.getNode(edge.targetId()).ifPresent(target -> {
+                    issues.add(new RiskScore(sourceId,
+                            "Cross-service call to " + target.name() + " has no @NewSpan or @WithSpan",
+                            12, RiskScore.RiskLevel.HIGH));
+                });
+            }
+        }
+
+        return new DimensionScore("OBSERVABILITY_HEALTH", Math.max(0, score), issues);
     }
 
     private DimensionScore computeContractHealth() {
@@ -159,6 +276,28 @@ public class ArchitecturalHealthAnalyzer {
         }
 
         return new DimensionScore("CONTRACT_HEALTH", score, issues);
+    }
+
+    private DimensionScore computeArchitectureRulesHealth() {
+        int score = 100;
+        List<RiskScore> issues = new ArrayList<>();
+
+        ArchitectureRuleEngine ruleEngine = new ArchitectureRuleEngine(graph);
+        List<RuleViolation> violations = ruleEngine.evaluate();
+
+        for (RuleViolation v : violations) {
+            int penalty = "ERROR".equals(v.rule().severity()) ? 20 : 10;
+            score = Math.max(0, score - penalty);
+            issues.add(new RiskScore(v.source().id(),
+                    v.rule().ruleId() + ": " + v.rule().description() + " ("
+                            + v.source().name() + " → " + v.target().name() + ")",
+                    penalty,
+                    "ERROR".equals(v.rule().severity())
+                            ? RiskScore.RiskLevel.HIGH
+                            : RiskScore.RiskLevel.MEDIUM));
+        }
+
+        return new DimensionScore("ARCHITECTURE_RULES_HEALTH", score, issues);
     }
 
     private List<String> buildRecommendations(Map<String, DimensionScore> dimensions) {
