@@ -6,6 +6,8 @@ import com.specter.core.index.SpecterIndexWriter;
 import com.specter.core.parser.*;
 import com.specter.core.registry.BeanRegistry;
 import com.specter.core.registry.BeanRegistry.BeanMetadata;
+import com.specter.core.watcher.SourceChangeTracker;
+import com.specter.core.watcher.SourceChangeTracker.ChangeSet;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -68,6 +70,11 @@ public class SpecterAnalysisEngine {
         resolvers.add(new WebMvcResolver(graph));
         resolvers.add(new SpringDataResolver(graph));
         resolvers.add(new MessagingResolver(graph));
+        resolvers.add(new SecurityFilterChainResolver(graph));
+        resolvers.add(new ConfigurationPropertiesResolver(graph));
+        resolvers.add(new OpenApiResolver(graph));
+        resolvers.add(new ServiceCallResolver(graph));
+        resolvers.add(new TestCoverageResolver(graph));
         if (classesRoot != null) {
             resolvers.add(new ProxyAnalysisResolver(graph, classesRoot));
         }
@@ -111,6 +118,94 @@ public class SpecterAnalysisEngine {
      */
     public void analyze(Path sourceRoot) throws IOException {
         analyze(sourceRoot, Set.of());
+    }
+
+    /**
+     * Factory method for multi-module Maven/Gradle projects.
+     * Discovers all submodules, runs a unified Pass 1 across all source roots,
+     * and produces a single graph with cross-module dependency edges.
+     */
+    public static SpecterAnalysisEngine forMultiModuleProject(Path projectRoot,
+                                                               Set<String> activeProfiles) throws IOException {
+        SpecterAnalysisEngine engine = new SpecterAnalysisEngine(null, activeProfiles);
+        ModuleTopologyResolver moduleResolver = new ModuleTopologyResolver(engine.graph);
+        var moduleMap = moduleResolver.discover(projectRoot);
+
+        // Unified Pass 1 across all module source roots
+        for (var entry : moduleMap.entrySet()) {
+            ModuleTopologyResolver.ModuleDescriptor md = entry.getValue();
+            BeanRegistryResolver scanResolver = new BeanRegistryResolver(
+                    engine.registry, md.sourceRoot(), null, activeProfiles);
+            scanResolver.resolve(md.sourceRoot());
+        }
+        log.info("Multi-module Pass 1 complete — {} active beans registered", engine.registry.size());
+
+        // Pass 2 across all source roots
+        for (var entry : moduleMap.entrySet()) {
+            ModuleTopologyResolver.ModuleDescriptor md = entry.getValue();
+            for (FrameworkResolver resolver : engine.pass2Resolvers) {
+                resolver.resolve(md.sourceRoot());
+                log.info("[{}] {} complete — {} nodes, {} edges",
+                        md.artifactId(), resolver.name(),
+                        engine.graph.nodeCount(), engine.graph.edgeCount());
+            }
+        }
+
+        engine.reindex();
+        log.info("Multi-module analysis complete. Graph: {} nodes, {} edges. Registry: {} beans.",
+                engine.graph.nodeCount(), engine.graph.edgeCount(), engine.registry.size());
+
+        return engine;
+    }
+
+    /**
+     * Incremental analysis — only re-processes files changed since the
+     * last analysis run. Significantly faster at enterprise scale.
+     */
+    public ChangeSet analyzeIncremental(Path sourceRoot, Set<String> activeProfiles) throws IOException {
+        SourceChangeTracker tracker = new SourceChangeTracker(sourceRoot);
+        ChangeSet changes = tracker.computeChanges(sourceRoot);
+
+        if (!changes.hasChanges()) {
+            log.info("No changes detected — skipping re-analysis");
+            return changes;
+        }
+
+        log.info("Incremental analysis: +{} added, ~{} modified, -{} deleted",
+                changes.added().size(), changes.modified().size(), changes.deleted().size());
+
+        for (Path deleted : changes.deleted()) {
+            graph.removeNodesForFile(deleted);
+        }
+
+        Set<Path> reprocess = new HashSet<>();
+        reprocess.addAll(changes.added());
+        reprocess.addAll(changes.modified());
+        for (Path file : reprocess) {
+            graph.removeNodesForFile(file);
+        }
+
+        for (FrameworkResolver resolver : pass2Resolvers) {
+            try {
+                resolver.resolveFiles(reprocess);
+            } catch (UnsupportedOperationException e) {
+                resolver.resolve(sourceRoot);
+            }
+        }
+
+        reindex();
+        tracker.persistFingerprints(sourceRoot);
+
+        log.info("Incremental analysis complete. Graph: {} nodes, {} edges. Registry: {} beans.",
+                graph.nodeCount(), graph.edgeCount(), registry.size());
+
+        return changes;
+    }
+
+    private void reindex() throws IOException {
+        indexWriter.indexNodes(graph.allNodes());
+        graph.allEdges().forEach(indexWriter::indexEdge);
+        indexWriter.commit();
     }
 
     // ── Query API ────────────────────────────────────────────────────────
@@ -317,6 +412,24 @@ public class SpecterAnalysisEngine {
         return summary;
     }
 
+    public List<ApiEndpoint> getApiSurface() {
+        return graph.allNodes().stream()
+                .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT)
+                .map(node -> {
+                    var meta = node.metadata();
+                    String controllerClass = meta.getOrDefault("controllerClass", "unknown");
+                    String httpVerb = meta.getOrDefault("httpVerb", "REQUEST");
+                    String path = meta.getOrDefault("path", "/");
+                    return new ApiEndpoint(httpVerb, path, controllerClass,
+                            meta.getOrDefault("methodName", ""),
+                            meta.getOrDefault("produces", null),
+                            meta.getOrDefault("consumes", null));
+                })
+                .sorted(Comparator.comparing(ApiEndpoint::path)
+                        .thenComparing(ApiEndpoint::httpVerb))
+                .collect(Collectors.toList());
+    }
+
     public SpecterGraph getGraph() { return graph; }
     public BeanRegistry getRegistry() { return registry; }
 
@@ -362,5 +475,14 @@ public class SpecterAnalysisEngine {
     public record TransactionBoundaryResult(
             String className,
             List<SpecterNode> boundaries
+    ) {}
+
+    public record ApiEndpoint(
+            String httpVerb,
+            String path,
+            String controllerClass,
+            String methodName,
+            String produces,
+            String consumes
     ) {}
 }
