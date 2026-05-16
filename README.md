@@ -14,16 +14,15 @@ Specter builds a deterministic, in-memory directed graph of your application's t
 
 ```mermaid
 graph TD
-    A[HTTP GET /api/orders] -->|ROUTES_TO| B(@RestController)
-    B -->|CALLS| C(AOP Proxy: @Transactional)
-    C -->|CALLS| D(@Service OrderLogic)
-    D -->|INJECTS| E(@Primary @Repository)
+    A[HTTP GET /api/orders] -->|ROUTES_TO| B("@RestController")
+    B -->|CALLS| C("AOP Proxy: @Transactional")
+    C -->|CALLS| D("@Service OrderLogic")
+    D -->|INJECTS| E("@Primary @Repository")
     E -->|MAPS_TO| F(Persistence Entity)
     D -->|PUBLISHES_TO| G(Kafka Topic: order_events)
     F -->|BELONGS_TO| H(Persistence Entity: Customer)
     F -->|HAS_MANY| I(Persistence Entity: LineItem)
 ```
-
 ## ✨ Core Capabilities
 
 - **Java 25 & Virtual Threads**: Built on the bleeding-edge LTS. Traverses massive enterprise graphs utilizing millions of lightweight virtual threads for sub-millisecond graph resolution.
