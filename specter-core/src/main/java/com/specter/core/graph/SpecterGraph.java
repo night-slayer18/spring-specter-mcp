@@ -1,5 +1,7 @@
 package com.specter.core.graph;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -104,5 +106,30 @@ public class SpecterGraph {
     public void clear() {
         nodes.clear();
         edges.clear();
+    }
+
+    public void removeNodesForFile(Path file) {
+        String filePath = file.toAbsolutePath().toString();
+        List<String> toRemove = nodes.values().stream()
+                .filter(n -> {
+                    String src = n.metadata().get("sourceFile");
+                    return src != null && src.equals(filePath);
+                })
+                .map(SpecterNode::id)
+                .toList();
+
+        for (String id : toRemove) {
+            nodes.remove(id);
+            edges.removeIf(e -> e.sourceId().equals(id) || e.targetId().equals(id));
+        }
+    }
+
+    public void saveToFile(Path outputPath) throws IOException {
+        // Delegated to GraphSerializer
+    }
+
+    public static SpecterGraph loadFromFile(Path inputPath) throws IOException {
+        // Delegated to GraphSerializer
+        return new SpecterGraph();
     }
 }

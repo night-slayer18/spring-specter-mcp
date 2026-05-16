@@ -12,5 +12,17 @@ public enum EdgeType {
     CONTAINS,
     ROUTES_TO,
     HAS_MANY,
-    BELONGS_TO
+    BELONGS_TO,
+    SECURED_BY,
+    CONFIGURED_BY,
+    USES_CONFIG,
+    RESOLVES_TO,
+    ACCEPTS,
+    RETURNS,
+    CALLS_REMOTE,
+    LOAD_BALANCED_BY,
+    TESTS,
+    MOCKS,
+    DEPENDS_ON,
+    OVERRIDES
 }
