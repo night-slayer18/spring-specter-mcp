@@ -12,7 +12,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 import lombok.extern.slf4j.Slf4j;
@@ -137,6 +136,30 @@ public class AopProxyResolver implements FrameworkResolver {
 
     // ── Phase B: Edge rewiring ───────────────────────────────────────────
 
+    /**
+     * Resolves the AOP stereotypes for a class name that may be a simple name
+     * (from a CALLS edge variable scope) or a fully-qualified name.
+     */
+    private Set<String> findStereotypes(String className) {
+        Set<String> direct = classAopStereotypes.get(className);
+        if (direct != null) return direct;
+
+        String simpleName = className.contains(".")
+                ? className.substring(className.lastIndexOf('.') + 1)
+                : className;
+        String lowerSimple = simpleName.toLowerCase();
+
+        return classAopStereotypes.entrySet().stream()
+                .filter(e -> {
+                    String fqn = e.getKey().toLowerCase();
+                    return fqn.equals(lowerSimple)
+                            || fqn.endsWith("." + lowerSimple);
+                })
+                .findFirst()
+                .map(Map.Entry::getValue)
+                .orElse(null);
+    }
+
     private void rewireProxyEdges() {
         // Snapshot existing CALLS edges so we can safely modify
         List<SpecterEdge> callEdges = new ArrayList<>();
@@ -155,7 +178,7 @@ public class AopProxyResolver implements FrameworkResolver {
             if (!targetId.startsWith("class:")) continue;
             String targetClass = targetId.substring("class:".length());
 
-            Set<String> stereotypes = classAopStereotypes.get(targetClass);
+            Set<String> stereotypes = findStereotypes(targetClass);
             if (stereotypes == null || stereotypes.isEmpty()) continue;
 
             String sourceId = callEdge.sourceId();
