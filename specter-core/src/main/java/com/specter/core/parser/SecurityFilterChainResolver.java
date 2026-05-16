@@ -10,6 +10,7 @@ import com.specter.core.graph.*;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -143,7 +144,7 @@ public class SecurityFilterChainResolver implements FrameworkResolver {
             String[] lines = body.split("\n");
             for (String line : lines) {
                 if (line.contains("requestMatchers") && line.contains("hasRole")) {
-                    String flagId = "security_flag:" + className + ".AUTH_MATCHER_" + flagIdCounter++;
+                    String flagId = "security_flag:" + className + ".AUTH_MATCHER_" + flagIdCounter.getAndIncrement();
                     SpecterNode flagNode = SpecterNode.of(flagId, "AuthMatcher", NodeType.SECURITY_FLAG)
                             .withMetadata("rule", line.trim());
                     graph.addNode(flagNode);
@@ -156,5 +157,5 @@ public class SecurityFilterChainResolver implements FrameworkResolver {
         }
     }
 
-    private int flagIdCounter = 0;
+    private final AtomicInteger flagIdCounter = new AtomicInteger(0);
 }

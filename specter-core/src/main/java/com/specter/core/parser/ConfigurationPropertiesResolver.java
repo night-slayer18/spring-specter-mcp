@@ -122,7 +122,12 @@ public class ConfigurationPropertiesResolver implements FrameworkResolver {
 
             String expression = "";
             if (ann instanceof SingleMemberAnnotationExpr sma) {
-                expression = sma.getMemberValue().asStringLiteralExpr().getValue();
+                var value = sma.getMemberValue();
+                if (value.isStringLiteralExpr()) {
+                    expression = value.asStringLiteralExpr().getValue();
+                } else {
+                    expression = value.toString().replaceAll("\"", "");
+                }
             }
 
             if (expression.startsWith("${") && expression.contains(":")) {

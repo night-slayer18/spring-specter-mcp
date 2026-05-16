@@ -3,7 +3,6 @@ package com.specter.core.parser;
 import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
-import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.expr.*;
 import com.specter.core.graph.*;
 import org.yaml.snakeyaml.Yaml;
@@ -80,9 +79,13 @@ public class OpenApiResolver implements FrameworkResolver {
                                 .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT
                                         && method.getNameAsString().equals(n.metadata().get("methodName")))
                                 .forEach(ep -> {
-                                    if (!summaryHolder[0].isEmpty()) ep.metadata().put("operationSummary", summaryHolder[0]);
-                                    if (!operationIdHolder[0].isEmpty()) ep.metadata().put("operationId", operationIdHolder[0]);
-                                    ep.metadata().put("hasOpenApiAnnotation", "true");
+                                    SpecterNode enriched = ep;
+                                    if (!summaryHolder[0].isEmpty())
+                                        enriched = enriched.withMetadata("operationSummary", summaryHolder[0]);
+                                    if (!operationIdHolder[0].isEmpty())
+                                        enriched = enriched.withMetadata("operationId", operationIdHolder[0]);
+                                    enriched = enriched.withMetadata("hasOpenApiAnnotation", "true");
+                                    graph.addNode(enriched);
                                 });
                     }
 
@@ -94,7 +97,7 @@ public class OpenApiResolver implements FrameworkResolver {
                             graph.allNodes().stream()
                                     .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT
                                             && method.getNameAsString().equals(n.metadata().get("methodName")))
-                                    .forEach(ep -> ep.metadata().put("responseCode", code));
+                                    .forEach(ep -> graph.addNode(ep.withMetadata("responseCode", code)));
                         }
                     }
                 })
@@ -144,7 +147,7 @@ public class OpenApiResolver implements FrameworkResolver {
                                     .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT
                                             && verb.equalsIgnoreCase(n.metadata().get("httpVerb"))
                                             && specPathStr.equals(n.metadata().get("path")))
-                                    .forEach(ep -> ep.metadata().put("hasOpenApiSpec", "true"));
+                                    .forEach(ep -> graph.addNode(ep.withMetadata("hasOpenApiSpec", "true")));
                         }
                     }
                 }
