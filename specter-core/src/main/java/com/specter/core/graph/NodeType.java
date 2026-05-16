@@ -1,0 +1,19 @@
+package com.specter.core.graph;
+
+public enum NodeType {
+    CONTROLLER,
+    SERVICE,
+    REPOSITORY,
+    COMPONENT,
+    CONFIGURATION,
+    PERSISTENCE_ENTITY,
+    DATA_REPOSITORY,
+    DATA_CONVERTER,
+    MESSAGE_PRODUCER,
+    MESSAGE_CONSUMER,
+    MESSAGE_TOPIC,
+    PROXY,
+    CLASS,
+    INTERFACE,
+    METHOD
+}
