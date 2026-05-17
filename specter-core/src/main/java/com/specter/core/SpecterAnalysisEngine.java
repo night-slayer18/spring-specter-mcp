@@ -42,7 +42,19 @@ public class SpecterAnalysisEngine {
     /** Volatile ensures visibility across virtual threads without synchronization overhead. */
     private volatile AnalysisProgressListener progressListener;
 
-    private final List<FrameworkResolver> pass2Resolvers;
+    /**
+     * Sequential resolvers — must run in order (dependency graph matters):
+     * SpringDependencyResolver adds CALLS/INJECTS edges that AopProxyResolver
+     * consumes. Running them in parallel would produce an empty proxy list.
+     */
+    private final List<FrameworkResolver> sequentialResolvers;
+
+    /**
+     * Parallel resolvers — independent of each other and of the sequential
+     * resolvers. They only read source files and add distinct node/edge types.
+     * Run concurrently on virtual threads after sequential resolvers complete.
+     */
+    private final List<FrameworkResolver> parallelResolvers;
 
     public SpecterAnalysisEngine() throws IOException {
         this(null, Set.of());
@@ -62,29 +74,39 @@ public class SpecterAnalysisEngine {
         this.indexWriter = new SpecterIndexWriter();
         this.indexSearcher = new SpecterIndexSearcher(indexWriter.getDirectory());
         this.registry = new BeanRegistry();
-        this.pass2Resolvers = buildPass2Resolvers(classesRoot);
+        this.sequentialResolvers = buildSequentialResolvers(classesRoot);
+        this.parallelResolvers   = buildParallelResolvers();
     }
 
-    private List<FrameworkResolver> buildPass2Resolvers(Path classesRoot) {
+    private List<FrameworkResolver> buildSequentialResolvers(Path classesRoot) {
+        // Order matters: SpringDependencyResolver must add CALLS/INJECTS edges
+        // before AopProxyResolver reads them for proxy rewiring.
         List<FrameworkResolver> resolvers = new ArrayList<>();
         resolvers.add(new SpringDependencyResolver(graph, registry));
         resolvers.add(new AopProxyResolver(graph, registry));
-        resolvers.add(new WebMvcResolver(graph));
-        resolvers.add(new SpringDataResolver(graph));
-        resolvers.add(new MessagingResolver(graph));
-        resolvers.add(new SecurityFilterChainResolver(graph));
-        resolvers.add(new ConfigurationPropertiesResolver(graph));
-        resolvers.add(new OpenApiResolver(graph));
-        resolvers.add(new ServiceCallResolver(graph));
-        resolvers.add(new TestCoverageResolver(graph));
-        resolvers.add(new ObservabilityResolver(graph));
-        resolvers.add(new PerformancePatternResolver(graph));
-        resolvers.add(new DatabaseSchemaResolver(graph));
-        resolvers.add(new GraalVmCompatibilityResolver(graph));
         if (classesRoot != null) {
             resolvers.add(new ProxyAnalysisResolver(graph, classesRoot));
         }
         return List.copyOf(resolvers);
+    }
+
+    private List<FrameworkResolver> buildParallelResolvers() {
+        // These resolvers are independent of each other and of SpringDependencyResolver —
+        // they only read source files and add their own node/edge types to the graph.
+        return List.of(
+                new WebMvcResolver(graph),
+                new SpringDataResolver(graph),
+                new MessagingResolver(graph),
+                new SecurityFilterChainResolver(graph),
+                new ConfigurationPropertiesResolver(graph),
+                new OpenApiResolver(graph),
+                new ServiceCallResolver(graph),
+                new TestCoverageResolver(graph),
+                new ObservabilityResolver(graph),
+                new PerformancePatternResolver(graph),
+                new DatabaseSchemaResolver(graph),
+                new GraalVmCompatibilityResolver(graph)
+        );
     }
 
     /**
@@ -105,8 +127,20 @@ public class SpecterAnalysisEngine {
         scanResolver.resolve(sourceRoot);
         log.info("Pass 1 complete — {} active beans registered", registry.size());
 
-        // ═══ Pass 2: Parallel resolver execution using virtual threads ════════════════════════
-        runResolversInParallel(pass2Resolvers, sourceRoot);
+        // ═══ Pass 2: Sequential resolvers first (order-dependent)
+        for (FrameworkResolver resolver : sequentialResolvers) {
+            try {
+                resolver.resolve(sourceRoot);
+                log.info("{} complete — {} nodes, {} edges",
+                        resolver.name(), graph.nodeCount(), graph.edgeCount());
+                notifyProgress(resolver.name(), graph.nodeCount(), graph.edgeCount());
+            } catch (Exception e) {
+                log.error("Sequential resolver '{}' failed — continuing", resolver.name(), e);
+            }
+        }
+
+        // ═══ Pass 2: Parallel resolvers (independent, no ordering constraints)
+        runResolversInParallel(parallelResolvers, sourceRoot);
 
         // ═══ Index ═══════════════════════════════════════════════════════
         reindex();
@@ -183,10 +217,14 @@ public class SpecterAnalysisEngine {
         }
         log.info("Multi-module Pass 1 complete — {} active beans registered", engine.registry.size());
 
-        // Pass 2 across all source roots — parallel within each module
+        // Pass 2 across all source roots — sequential then parallel per module
         for (var entry : moduleMap.entrySet()) {
             ModuleTopologyResolver.ModuleDescriptor md = entry.getValue();
-            engine.runResolversInParallel(engine.pass2Resolvers, md.sourceRoot());
+            for (FrameworkResolver resolver : engine.sequentialResolvers) {
+                try { resolver.resolve(md.sourceRoot()); }
+                catch (Exception e) { log.error("Sequential resolver '{}' failed", resolver.name(), e); }
+            }
+            engine.runResolversInParallel(engine.parallelResolvers, md.sourceRoot());
             log.info("[{}] Pass 2 complete — {} nodes, {} edges",
                     md.artifactId(), engine.graph.nodeCount(), engine.graph.edgeCount());
         }
@@ -223,7 +261,20 @@ public class SpecterAnalysisEngine {
             graph.removeNodesForFile(file);
         }
 
-        List<Callable<Void>> tasks = pass2Resolvers.stream()
+        // Sequential resolvers first (AopProxyResolver depends on SpringDependencyResolver)
+        for (FrameworkResolver resolver : sequentialResolvers) {
+            try {
+                resolver.resolveFiles(reprocess);
+            } catch (UnsupportedOperationException e) {
+                try { resolver.resolve(sourceRoot); }
+                catch (Exception ex) { log.error("Resolver '{}' failed during incremental", resolver.name(), ex); }
+            } catch (Exception e) {
+                log.error("Resolver '{}' failed during incremental", resolver.name(), e);
+            }
+        }
+
+        // Parallel resolvers
+        List<Callable<Void>> tasks = parallelResolvers.stream()
                 .map(resolver -> (Callable<Void>) () -> {
                     try {
                         resolver.resolveFiles(reprocess);
