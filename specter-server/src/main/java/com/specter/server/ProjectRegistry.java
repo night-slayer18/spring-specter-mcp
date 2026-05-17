@@ -15,6 +15,10 @@ import lombok.extern.slf4j.Slf4j;
  * Manages multiple {@link SpecterAnalysisEngine} instances — one per registered
  * project. Supports concurrent analysis via virtual threads and persistent
  * graph caching to disk.
+ *
+ * <p>Project IDs are derived deterministically from the normalized source-root
+ * path hash, making {@link #registerProject} idempotent: calling it twice
+ * with the same path returns the existing context immediately.
  */
 @Slf4j
 public class ProjectRegistry {
@@ -38,24 +42,35 @@ public class ProjectRegistry {
     public enum AnalysisStatus { PENDING, ANALYZING, READY, FAILED }
 
     /**
-     * Registers a project and triggers async analysis. If a cached graph exists,
-     * runs incremental; otherwise runs full analysis. Returns immediately with
-     * ANALYZING status.
+     * Registers a project and triggers async analysis.
+     *
+     * <p>The {@code projectId} is derived from a SHA-256 prefix of the
+     * normalized source-root path — calling this method twice with the
+     * same {@code sourceRoot} is therefore idempotent and returns the
+     * existing {@link ProjectContext} without spawning a second analysis thread.
+     *
+     * @param sourceRoot  absolute path to the project source root
+     * @param displayName optional human-readable name; defaults to directory name
      */
     public ProjectContext registerProject(String sourceRoot, String displayName) throws IOException {
         Path root = Path.of(sourceRoot).toAbsolutePath();
-        String projectId = UUID.randomUUID().toString();
-        String name = displayName != null && !displayName.isBlank() ? displayName : root.getFileName().toString();
+        // Deterministic ID — deduplication actually works
+        String projectId = GraphSerializer.projectHash(root);
+        String name = displayName != null && !displayName.isBlank()
+                ? displayName : root.getFileName().toString();
 
-        if (projects.containsKey(projectId)) {
-            return projects.get(projectId);
+        // Idempotent: return existing context if already registered
+        ProjectContext existing = projects.get(projectId);
+        if (existing != null) {
+            log.debug("Project '{}' already registered — returning existing context", name);
+            return existing;
         }
 
         Path graphCache = cacheDir.resolve("graph-" + projectId + ".json");
         SpecterAnalysisEngine engine = new SpecterAnalysisEngine(null, Set.of());
 
-        ProjectContext ctx = new ProjectContext(projectId, name, root, engine, Instant.now(),
-                AnalysisStatus.PENDING);
+        ProjectContext ctx = new ProjectContext(projectId, name, root, engine,
+                Instant.now(), AnalysisStatus.PENDING);
         projects.put(projectId, ctx);
 
         Thread.startVirtualThread(() -> {
