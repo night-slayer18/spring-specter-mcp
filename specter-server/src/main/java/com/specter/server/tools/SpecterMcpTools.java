@@ -4,7 +4,6 @@ import com.specter.core.SpecterAnalysisEngine;
 import com.specter.core.SpecterAnalysisEngine.*;
 import com.specter.core.rules.ArchitectureRuleEngine;
 import com.specter.core.rules.ArchitectureRule;
-import com.specter.core.rules.RuleViolation;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer.DimensionScore;
 import com.specter.core.analysis.GraphDiff;
