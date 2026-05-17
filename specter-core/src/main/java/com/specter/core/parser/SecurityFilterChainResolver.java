@@ -80,18 +80,25 @@ public class SecurityFilterChainResolver implements FrameworkResolver {
         String annName = ann.getNameAsString();
         if (!SECURITY_ANNOTATIONS.contains(annName)) return;
 
-        String expression = "";
+        // Capture expression — previous code discarded the toString() result
+        String[] expr = {""};
         if (ann instanceof SingleMemberAnnotationExpr sma) {
-            expression = sma.getMemberValue().toString();
+            expr[0] = sma.getMemberValue().toString().replaceAll("^\"|\"$", "");
         } else if (ann instanceof NormalAnnotationExpr na) {
             na.getPairs().stream()
                     .filter(p -> "value".equals(p.getNameAsString()))
                     .findFirst()
-                    .ifPresent(p -> p.getValue().toString());
+                    .ifPresent(p -> expr[0] = p.getValue().toString().replaceAll("^\"|\"$", ""));
         }
+        String expression = expr[0];
 
-        String ruleId = "auth_rule:" + classNodeId.substring("class:".length()) + "." + annName;
-        SpecterNode ruleNode = SpecterNode.of(ruleId, annName + " on " + classNodeId, NodeType.AUTH_RULE)
+        // classNodeId carries "class:" prefix but controllerClass metadata does not
+        String rawClassName = classNodeId.startsWith("class:")
+                ? classNodeId.substring("class:".length())
+                : classNodeId;
+
+        String ruleId = "auth_rule:" + rawClassName + "." + annName;
+        SpecterNode ruleNode = SpecterNode.of(ruleId, annName + " on " + rawClassName, NodeType.AUTH_RULE)
                 .withMetadata("annotation", annName)
                 .withMetadata("expression", expression)
                 .withMetadata("sourceFile", sourceFile);
@@ -100,12 +107,13 @@ public class SecurityFilterChainResolver implements FrameworkResolver {
         graph.getNode(classNodeId).ifPresent(node ->
                 graph.addEdge(node.id(), ruleId, EdgeType.SECURED_BY));
 
-        // Also secure any CONTROLLER_ENDPOINT belonging to this class
+        // Secure any CONTROLLER_ENDPOINT belonging to this class
         graph.allNodes().stream()
                 .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT
-                        && classNodeId.equals(n.metadata().get("controllerClass")))
+                        && rawClassName.equals(n.metadata().get("controllerClass")))
                 .forEach(ep -> graph.addEdge(ep.id(), ruleId, EdgeType.SECURED_BY));
     }
+
 
     private void parseHttpSecurity(ClassOrInterfaceDeclaration cls, String className) {
         // Look for SecurityFilterChain bean method patterns
