@@ -5,6 +5,7 @@
 [![MCP Protocol](https://img.shields.io/badge/MCP-Enabled-purple.svg)](https://modelcontextprotocol.io/)
 [![WebSocket](https://img.shields.io/badge/WebSocket-STOMP-orange.svg)](https://stomp.github.io/)
 [![Anthropic](https://img.shields.io/badge/AI_Remediation-Claude_Sonnet_4-red.svg)](https://anthropic.com/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](LICENSE)
 
 **Spring-Specter** is a framework-aware Model Context Protocol (MCP) server built for AI Coding Agents (Claude, Cline, Command Code). Unlike generic AST parsers that only see surface-level syntax trees, Specter acts as a **Runtime Context Simulator** — utilizing JavaParser, ASM Bytecode Analysis, and an embedded Apache Lucene index to map the invisible runtime architecture of Spring Boot applications directly to AI agents.
 
@@ -33,7 +34,7 @@ graph TD
 
 | Resolver | What It Maps | Graph Nodes |
 |----------|-------------|-------------|
-| **BeanRegistryResolver** | `@ComponentScan` simulation — discovers active beans by profile | 7 stereotype types |
+| **BeanRegistryResolver** | `@ComponentScan` simulation — discovers active beans by profile, evaluates `@ConditionalOnProperty` against `application.properties` | 7 stereotype types |
 | **SpringDependencyResolver** | `@Autowired`, `@Qualifier`, `@Primary` injection chains | INJECTS edges |
 | **AopProxyResolver** | `@Transactional`, `@Async`, `@Cacheable` interception boundaries | PROXY nodes |
 | **WebMvcResolver** | `@GetMapping`, `@PostMapping`, `@RequestMapping` → REST API surface | CONTROLLER_ENDPOINT |
@@ -46,14 +47,14 @@ graph TD
 | **ServiceCallResolver** | `RestTemplate`, `WebClient`, `@FeignClient` → service-to-service call graph | EXTERNAL_SERVICE + CALLS_REMOTE |
 | **TestCoverageResolver** | `@SpringBootTest`, `@WebMvcTest`, `@MockBean` → test-to-component coverage matrix | TESTS/MOCKS edges |
 
-### Enterprise Health & Observability (Phase 11)
+### Enterprise Health & Observability
 
 | Resolver | What It Maps | Health Dimension |
 |----------|-------------|-----------------|
 | **ObservabilityResolver** | `@Timed`, `MeterRegistry` injection, `@NewSpan` tracing, `@Slf4j` logging | OBSERVABILITY_HEALTH |
 | **PerformancePatternResolver** | N+1 query hotspots, missing `@Transactional`, `@Cacheable` gaps, lazy-loading flags | (performance antipattern detection) |
 
-### Schema & Architecture Governance (Phases 12-15)
+### Schema & Architecture Governance
 
 | Resolver / Engine | Purpose |
 |-------------------|---------|
@@ -61,19 +62,19 @@ graph TD
 | **GraphDiff** | Snapshots + diff engine — captures graph state before/after refactors, computes blast radius of all changes |
 | **DatabaseSchemaResolver** | Parses Flyway `V*.sql` + Liquibase XML changelogs → correlates `@Table`/`@Column` entities with actual DB schema |
 
-### Real-time Streaming (Phase 16)
+### Real-time Streaming
 
 - **WebSocket STOMP** endpoint at `/specter-ws` with SockJS fallback
 - 3 topics: `/topic/graph-updates`, `/topic/health-updates`, `/topic/analysis-progress`
 - Non-blocking publish — WebSocket failures never abort analysis
 
-### AI-Powered Remediation (Phase 17)
+### AI-Powered Remediation
 
 - **RemediationEngine** calls Claude Sonnet 4 via Anthropic API
 - Generates specific before/after code fixes with downtime assessments and effort estimates
 - API only invoked when tools are explicitly called — never during analysis passes
 
-### GraalVM Native Readiness (Phase 19)
+### GraalVM Native Readiness
 
 - Detects reflection usage, dynamic proxies, resource loading without AOT hints
 - Flags `@Lazy`, non-singleton scopes incompatible with native compilation
@@ -139,7 +140,7 @@ graph TD
 | `add_custom_rule(...)` | Add custom edge-type constraints between node types |
 | `take_snapshot(label)` | Capture graph state for before/after diff comparison |
 | `diff_snapshots(before, after)` | Added/removed/changed nodes + composite blast radius |
-| `list_snapshots()` | All snapshots with labels and timestamps |
+| `list_snapshots()` | All snapshots with real capture timestamps |
 
 ### Schema (2 tools)
 | Tool | Description |
@@ -152,7 +153,7 @@ graph TD
 |------|-------------|
 | `switch_project(path, sourceRoot)` | Hot-swap analysis context without restart |
 | `list_projects()` | All cached project contexts |
-| `register_project(name, path)` | Register a new project for the multi-project registry |
+| `register_project(name, path)` | Register a new project — idempotent, same path returns existing context |
 | `get_websocket_endpoint()` | WebSocket URL + topic descriptions for real-time subscriptions |
 
 ### AI Remediation (2 tools)
@@ -172,35 +173,37 @@ graph TD
 spring-specter-mcp/
 ├── specter-core/                    # Graph engine + 16 resolvers
 │   └── src/main/java/com/specter/core/
-│       ├── graph/                   # 30 NodeTypes, 24 EdgeTypes, SpecterGraph
-│       ├── parser/                  # 16 FrameworkResolvers
-│       │   ├── BeanRegistryResolver          # Pass 1: @ComponentScan
-│       │   ├── SpringDependencyResolver       # @Autowired/@Qualifier
-│       │   ├── AopProxyResolver              # @Aspect proxy rewiring
-│       │   ├── WebMvcResolver                # HTTP endpoint mapping
-│       │   ├── SpringDataResolver            # Repository/entity + relational edges
-│       │   ├── MessagingResolver             # Kafka/Rabbit/Cloud Stream topology
-│       │   ├── ProxyAnalysisResolver         # ASM bytecode proxy detection
-│       │   ├── SecurityFilterChainResolver    # Security boundary mapping
-│       │   ├── ConfigurationPropertiesResolver # Config injection tracing
-│       │   ├── OpenApiResolver               # OpenAPI spec correlation
-│       │   ├── ServiceCallResolver           # REST/Feign call mapping
-│       │   ├── TestCoverageResolver          # Test→component coverage
-│       │   ├── ObservabilityResolver         # Metrics/tracing/logging
-│       │   ├── PerformancePatternResolver    # N+1, missing transactions
-│       │   ├── DatabaseSchemaResolver         # Flyway/Liquibase ↔ entity
-│       │   └── GraalVmCompatibilityResolver  # Native/AOT readiness
-│       ├── registry/                # BeanRegistry with conditional metadata
+│       ├── graph/                   # SpecterGraph (O(1) adjacency-list indexes), NodeType, EdgeType
+│       ├── parser/                  # 16 FrameworkResolvers (2 sequential + 12 parallel + 2 optional)
+│       │   ├── BeanRegistryResolver          # Pass 1: @ComponentScan + @ConditionalOnProperty eval
+│       │   ├── SpringDependencyResolver       # Pass 2a (sequential): @Autowired/@Qualifier
+│       │   ├── AopProxyResolver              # Pass 2a (sequential): @Aspect proxy rewiring
+│       │   ├── WebMvcResolver                # Pass 2b (parallel): HTTP endpoint mapping
+│       │   ├── SpringDataResolver            # Pass 2b (parallel): Repository/entity edges
+│       │   ├── MessagingResolver             # Pass 2b (parallel): Kafka/Rabbit topology
+│       │   ├── ProxyAnalysisResolver         # Pass 2a (sequential, optional): ASM bytecode
+│       │   ├── SecurityFilterChainResolver    # Pass 2b (parallel): Security boundary mapping
+│       │   ├── ConfigurationPropertiesResolver # Pass 2b (parallel): Config injection tracing
+│       │   ├── OpenApiResolver               # Pass 2b (parallel): OpenAPI spec correlation
+│       │   ├── ServiceCallResolver           # Pass 2b (parallel): REST/Feign call mapping
+│       │   ├── TestCoverageResolver          # Pass 2b (parallel): Test→component coverage
+│       │   ├── ObservabilityResolver         # Pass 2b (parallel): Metrics/tracing/logging
+│       │   ├── PerformancePatternResolver    # Pass 2b (parallel): N+1, missing transactions
+│       │   ├── DatabaseSchemaResolver         # Pass 2b (parallel): Flyway/Liquibase ↔ entity
+│       │   └── GraalVmCompatibilityResolver  # Pass 2b (parallel): Native/AOT readiness
+│       ├── registry/                # BeanRegistry with conditional + profile metadata
 │       ├── index/                   # Lucene RAM-based index
 │       ├── analysis/                # HealthAnalyzer (7 dimensions), GraphDiff, RiskScore
 │       ├── rules/                   # ArchitectureRuleEngine + RuleLibrary (5 built-in)
-│       ├── watcher/                 # Incremental file change detection
+│       ├── watcher/                 # Incremental file fingerprinting (SHA-256 + mtime)
+│       ├── persistence/             # GraphSerializer — graph + snapshot JSON persistence
 │       ├── provenance/              # Git signature verification
 │       └── SpecterAnalysisEngine    # Two-pass pipeline orchestrator
 │
 ├── specter-server/                  # MCP Server + WebSocket
 │   └── src/main/java/com/specter/server/
 │       ├── SpecterServerApplication  # Spring Boot entry point
+│       ├── ProjectRegistry           # Idempotent multi-project context manager
 │       ├── tools/SpecterMcpTools     # 41 MCP tool endpoints
 │       ├── streaming/                # WebSocket STOMP (GraphChangePublisher, WebSocketConfig)
 │       └── remediation/              # AI-powered fix generation (RemediationEngine)
@@ -208,10 +211,37 @@ spring-specter-mcp/
 └── .github/workflows/ci.yml         # CI/CD with architecture gate + PR comment
 ```
 
+## ⚙️ Analysis Pipeline
+
+```
+Source Root
+    │
+    ▼
+[Pass 1] BeanRegistryResolver          — sequential, must complete first
+    │  Simulates @ComponentScan, evaluates @ConditionalOnProperty,
+    │  @Profile filtering, resolves @Bean factory methods
+    │
+    ▼
+[Pass 2a] Sequential Resolvers         — ordered (dependency matters)
+    │  SpringDependencyResolver  →  adds CALLS + INJECTS edges
+    │  AopProxyResolver          →  reads CALLS edges, inserts PROXY nodes
+    │  ProxyAnalysisResolver     →  ASM bytecode (if classesRoot provided)
+    │
+    ▼
+[Pass 2b] Parallel Resolvers           — 12 resolvers on virtual threads
+    │  WebMvc, SpringData, Messaging, Security, ConfigProps,
+    │  OpenApi, ServiceCall, TestCoverage, Observability,
+    │  PerformancePattern, DatabaseSchema, GraalVm
+    │
+    ▼
+[Index]  Lucene RAM index — all nodes + edges committed
+```
+
 ## 🩺 7-Dimension Health Scoring
 
 Health is scored 0–100 using equal-weighted dimension averages. Each dimension
-is computed independently and contributes equally to the overall score.
+is computed independently — the overall score uses floating-point division to
+prevent integer-truncation rounding errors.
 
 | Dimension | What It Measures |
 |-----------|-----------------|
