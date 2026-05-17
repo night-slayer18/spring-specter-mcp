@@ -5,13 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -19,13 +17,25 @@ import lombok.extern.slf4j.Slf4j;
  * Tracks file modification state to enable incremental re-analysis.
  * Compares current file system state against persisted fingerprints,
  * returning only the files that have changed since the last analysis run.
+ *
+ * <h3>Serialization</h3>
+ * Fingerprints are persisted as {@code Map<String, FingerprintDto>} (path string → DTO)
+ * because Jackson cannot serialize {@link Path} objects as map keys without a custom
+ * module. In-memory, the working set is kept as {@code Map<Path, FileFingerprint>}.
+ *
+ * <h3>File scanning</h3>
+ * Uses {@link Files#walkFileTree} with a {@link SimpleFileVisitor} to avoid
+ * materialising the full file list before processing, and reads
+ * {@link BasicFileAttributes} in a single syscall per file.
  */
 @Slf4j
 public class SourceChangeTracker {
 
-    private final Map<Path, FileFingerprint> fingerprints = new ConcurrentHashMap<>();
-    private final ObjectMapper mapper = new ObjectMapper()
-            .enable(SerializationFeature.INDENT_OUTPUT);
+    /** Serialization-friendly DTO — avoids the Jackson {@code Path}-as-key problem. */
+    private record FingerprintDto(long lastModifiedMs, long sizeBytes, String sha256) {}
+
+    private final Map<Path, FileFingerprint> fingerprints = new ConcurrentHashMap<>(256);
+    private final ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
     private final Path cacheDir;
     private final Path fingerprintsFile;
 
@@ -43,9 +53,9 @@ public class SourceChangeTracker {
         loadFingerprints();
         Map<Path, FileFingerprint> current = buildCurrentFingerprints(sourceRoot);
 
-        Set<Path> added = new HashSet<>();
+        Set<Path> added    = new HashSet<>();
         Set<Path> modified = new HashSet<>();
-        Set<Path> deleted = new HashSet<>(fingerprints.keySet());
+        Set<Path> deleted  = new HashSet<>(fingerprints.keySet());
 
         for (var entry : current.entrySet()) {
             Path file = entry.getKey();
@@ -64,12 +74,10 @@ public class SourceChangeTracker {
         ChangeSet changeSet = new ChangeSet(
                 Collections.unmodifiableSet(added),
                 Collections.unmodifiableSet(modified),
-                Collections.unmodifiableSet(deleted)
-        );
+                Collections.unmodifiableSet(deleted));
 
         log.info("Change detection: +{} added, ~{} modified, -{} deleted",
                 added.size(), modified.size(), deleted.size());
-
         return changeSet;
     }
 
@@ -81,49 +89,58 @@ public class SourceChangeTracker {
         fingerprints.clear();
         fingerprints.putAll(current);
 
+        // Serialize as Map<String, FingerprintDto> — Path is not a valid Jackson map key
+        Map<String, FingerprintDto> serializable = HashMap.newHashMap(fingerprints.size());
+        fingerprints.forEach((path, fp) ->
+                serializable.put(path.toAbsolutePath().toString(),
+                        new FingerprintDto(fp.lastModifiedMs(), fp.sizeBytes(), fp.sha256())));
+
         Files.createDirectories(cacheDir);
-        mapper.writeValue(fingerprintsFile.toFile(), fingerprints);
+        mapper.writeValue(fingerprintsFile.toFile(), serializable);
         log.debug("Persisted {} fingerprints to {}", fingerprints.size(), fingerprintsFile);
     }
 
-    @SuppressWarnings("unchecked")
     private void loadFingerprints() {
         fingerprints.clear();
         if (!Files.exists(fingerprintsFile)) return;
 
         try {
-            Map<String, Map<String, Object>> raw = mapper.readValue(
+            Map<String, FingerprintDto> raw = mapper.readValue(
                     fingerprintsFile.toFile(),
-                    new TypeReference<Map<String, Map<String, Object>>>() {});
+                    new TypeReference<Map<String, FingerprintDto>>() {});
 
-            for (var entry : raw.entrySet()) {
-                Path file = Path.of(entry.getKey());
-                Map<String, Object> data = entry.getValue();
-                long lastModifiedMs = ((Number) data.get("lastModifiedMs")).longValue();
-                long sizeBytes = ((Number) data.get("sizeBytes")).longValue();
-                String sha256 = (String) data.get("sha256");
-                fingerprints.put(file, new FileFingerprint(file, lastModifiedMs, sizeBytes, sha256));
-            }
+            raw.forEach((pathStr, dto) -> {
+                Path file = Path.of(pathStr);
+                fingerprints.put(file, new FileFingerprint(file,
+                        dto.lastModifiedMs(), dto.sizeBytes(), dto.sha256()));
+            });
         } catch (IOException e) {
             log.warn("Failed to load fingerprints from {}: {}", fingerprintsFile, e.getMessage());
         }
     }
 
+    /**
+     * Walks the source tree using {@link Files#walkFileTree} — reads
+     * {@link BasicFileAttributes} in a single syscall per file, re-using
+     * a cached SHA-256 when mtime and size are unchanged.
+     */
     private Map<Path, FileFingerprint> buildCurrentFingerprints(Path sourceRoot) throws IOException {
-        Map<Path, FileFingerprint> map = new HashMap<>();
-        try (Stream<Path> files = Files.walk(sourceRoot)) {
-            for (Path file : files.filter(Files::isRegularFile)
-                    .filter(p -> p.toString().endsWith(".java"))
-                    .collect(Collectors.toList())) {
+        Map<Path, FileFingerprint> map = HashMap.newHashMap(256);
+
+        Files.walkFileTree(sourceRoot, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                if (!file.toString().endsWith(".java")) return FileVisitResult.CONTINUE;
                 try {
-                    long lastModifiedMs = Files.getLastModifiedTime(file).toMillis();
-                    long sizeBytes = Files.size(file);
+                    long lastModifiedMs = attrs.lastModifiedTime().toMillis();
+                    long sizeBytes      = attrs.size();
                     FileFingerprint oldFp = fingerprints.get(file);
                     String sha256;
 
-                    if (oldFp != null && oldFp.lastModifiedMs() == lastModifiedMs
+                    if (oldFp != null
+                            && oldFp.lastModifiedMs() == lastModifiedMs
                             && oldFp.sizeBytes() == sizeBytes) {
-                        sha256 = oldFp.sha256();
+                        sha256 = oldFp.sha256(); // cache hit — skip digest
                     } else {
                         sha256 = computeSha256(file);
                     }
@@ -132,28 +149,35 @@ public class SourceChangeTracker {
                 } catch (IOException e) {
                     log.debug("Failed to fingerprint file: {}", file, e);
                 }
+                return FileVisitResult.CONTINUE;
             }
-        }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                log.debug("Skipping unreadable file: {}", file);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+
         return map;
     }
 
     private String computeSha256(Path file) throws IOException {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] bytes = Files.readAllBytes(file);
-            byte[] hash = digest.digest(bytes);
-            StringBuilder hex = new StringBuilder();
-            for (byte b : hash) {
-                hex.append(String.format("%02x", b));
-            }
+            byte[] hash = digest.digest(Files.readAllBytes(file));
+            StringBuilder hex = new StringBuilder(64);
+            for (byte b : hash) hex.append(String.format("%02x", b));
             return hex.toString();
         } catch (Exception e) {
             return "unknown";
         }
     }
 
+    // ── Value records ────────────────────────────────────────────────────
+
     /**
-     * Describes the fingerprint of a single source file for change detection.
+     * Fingerprint of a single source file for change detection.
      */
     public record FileFingerprint(Path path, long lastModifiedMs, long sizeBytes, String sha256) {
         public FileFingerprint {
@@ -164,15 +188,10 @@ public class SourceChangeTracker {
     /**
      * Represents the set of changes detected since the last analysis run.
      */
-    public record ChangeSet(
-            Set<Path> added,
-            Set<Path> modified,
-            Set<Path> deleted
-    ) {
+    public record ChangeSet(Set<Path> added, Set<Path> modified, Set<Path> deleted) {
         public boolean hasChanges() {
             return !added.isEmpty() || !modified.isEmpty() || !deleted.isEmpty();
         }
-
         public int totalChanges() {
             return added.size() + modified.size() + deleted.size();
         }
