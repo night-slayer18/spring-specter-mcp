@@ -123,30 +123,44 @@ public class GraphSerializer {
         return data;
     }
 
-    @SuppressWarnings("unchecked")
+    private static final TypeReference<Map<String, Object>> MAP_TYPE =
+            new TypeReference<>() {};
+    private static final TypeReference<List<Map<String, Object>>> LIST_MAP_TYPE =
+            new TypeReference<>() {};
+
     private static SpecterGraph hydrateGraph(Map<String, Object> data) {
         SpecterGraph graph = new SpecterGraph();
 
-        List<Map<String, Object>> nodeList = (List<Map<String, Object>>) data.get("nodes");
-        if (nodeList != null) {
+        // Use TypeReference-driven re-deserialization to prevent ClassCastException
+        // when Jackson deserializes numeric JSON values as Integer rather than String.
+        Object rawNodes = data.get("nodes");
+        if (rawNodes != null) {
+            List<Map<String, Object>> nodeList = MAPPER.convertValue(rawNodes, LIST_MAP_TYPE);
             for (var map : nodeList) {
-                String id   = (String) map.get("id");
-                String name = (String) map.get("name");
-                NodeType type = NodeType.valueOf((String) map.get("type"));
-                Map<String, String> metadata = (Map<String, String>) map.getOrDefault("metadata", Map.of());
-                graph.addNode(new SpecterNode(id, name, type, new LinkedHashMap<>(metadata)));
+                String id   = String.valueOf(map.get("id"));
+                String name = String.valueOf(map.get("name"));
+                NodeType type = NodeType.valueOf(String.valueOf(map.get("type")));
+                Object rawMeta = map.getOrDefault("metadata", Map.of());
+                @SuppressWarnings("unchecked")
+                Map<String, Object> rawMetaMap = (rawMeta instanceof Map<?,?> m)
+                        ? (Map<String, Object>) m : Map.of();
+                Map<String, String> metadata = new LinkedHashMap<>();
+                rawMetaMap.forEach((k, v) -> metadata.put(k, String.valueOf(v)));
+                graph.addNode(new SpecterNode(id, name, type, metadata));
             }
         }
 
-        List<Map<String, String>> edgeList = (List<Map<String, String>>) data.get("edges");
-        if (edgeList != null) {
+        Object rawEdges = data.get("edges");
+        if (rawEdges != null) {
+            List<Map<String, Object>> edgeList = MAPPER.convertValue(rawEdges, LIST_MAP_TYPE);
             for (var map : edgeList) {
                 graph.addEdge(new SpecterEdge(
-                        map.get("sourceId"),
-                        map.get("targetId"),
-                        EdgeType.valueOf(map.get("type"))));
+                        String.valueOf(map.get("sourceId")),
+                        String.valueOf(map.get("targetId")),
+                        EdgeType.valueOf(String.valueOf(map.get("type")))));
             }
         }
         return graph;
     }
 }
+

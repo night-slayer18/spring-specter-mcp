@@ -140,9 +140,24 @@ public class ArchitecturalHealthAnalyzer {
 
         for (SpecterEdge edge : graph.allEdges()) {
             if (edge.type() != EdgeType.CALLS_REMOTE) continue;
-            graph.getNode(edge.targetId()).ifPresent(target -> {
-                issues.add(RiskScore.resilienceGap(edge.sourceId(), target.name()));
-            });
+
+            // only penalise callers that have no retry/circuit-breaker proxy.
+            // AopProxyResolver creates PROXY nodes with PROXY_STEREOTYPE metadata for
+            // @Retryable and @CircuitBreaker and connects them via CALLS edges.
+            boolean hasResilience = graph.getIncomingEdges(edge.sourceId()).stream()
+                    .anyMatch(e -> e.type() == EdgeType.CALLS
+                            && graph.getNode(e.sourceId())
+                                    .map(n -> n.type() == NodeType.PROXY
+                                            && (n.metadata().getOrDefault("PROXY_STEREOTYPE", "")
+                                                    .contains("RETRY_INTERCEPTOR")
+                                               || n.metadata().getOrDefault("PROXY_STEREOTYPE", "")
+                                                    .contains("CIRCUIT_BREAKER_INTERCEPTOR")))
+                                    .orElse(false));
+
+            if (!hasResilience) {
+                graph.getNode(edge.targetId()).ifPresent(target ->
+                        issues.add(RiskScore.resilienceGap(edge.sourceId(), target.name())));
+            }
         }
 
         score = Math.max(0, score - issues.size() * 15);

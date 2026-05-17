@@ -162,7 +162,7 @@ public class WebMvcResolver implements FrameworkResolver {
 
         final String cp = basePath;
         return switch (methodPath) {
-            case "/" -> cp;
+            case "/", "" -> cp;   // empty methodPath was producing "basePath/" (trailing slash)
             case String p when cp.endsWith("/") -> cp + (p.startsWith("/") ? p.substring(1) : p);
             case String p when p.startsWith("/") -> cp + p;
             default -> cp + "/" + methodPath;

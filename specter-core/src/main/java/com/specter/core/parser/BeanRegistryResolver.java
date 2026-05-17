@@ -301,8 +301,10 @@ public class BeanRegistryResolver implements FrameworkResolver {
                 String methodBeanName = extractBeanName(beanAnn, method);
                 String returnType = method.getType().asString();
 
-                BeanMetadata.Builder mb = BeanMetadata.builder(
-                        returnType, methodBeanName, classifyStereotype(cls));
+                // classify from the return type name, not the @Configuration class.
+                // Previously every @Bean method got NodeType.CONFIGURATION regardless of what it returned.
+                NodeType beanStereotype = classifyStereotypeFromTypeName(returnType);
+                BeanMetadata.Builder mb = BeanMetadata.builder(returnType, methodBeanName, beanStereotype);
 
                 method.getAnnotationByName("Primary")
                         .ifPresent(a -> mb.primary(true));
@@ -345,6 +347,31 @@ public class BeanRegistryResolver implements FrameworkResolver {
                 .findFirst()
                 .orElse(cls.isInterface() ? NodeType.INTERFACE : NodeType.CLASS);
     }
+
+    /**
+     * Infers a {@link NodeType} from a return type name so that
+     * {@code @Bean} factory methods are not all classified as {@code CONFIGURATION}.
+     * Falls back to {@link NodeType#COMPONENT} for unrecognised types.
+     */
+    private NodeType classifyStereotypeFromTypeName(String typeName) {
+        String simple = typeName.contains(".")
+                ? typeName.substring(typeName.lastIndexOf('.') + 1)
+                : typeName;
+        // Strip generic parameters e.g. "List<Order>" -> "List"
+        int genericIdx = simple.indexOf('<');
+        if (genericIdx > 0) simple = simple.substring(0, genericIdx);
+
+        if (simple.endsWith("Repository") || simple.endsWith("Dao") || simple.endsWith("DAO"))
+            return NodeType.REPOSITORY;
+        if (simple.endsWith("Service"))
+            return NodeType.SERVICE;
+        if (simple.endsWith("Controller"))
+            return NodeType.CONTROLLER;
+        if (simple.endsWith("Configuration") || simple.endsWith("Config"))
+            return NodeType.CONFIGURATION;
+        return NodeType.COMPONENT;
+    }
+
 
     private String resolveBeanName(ClassOrInterfaceDeclaration cls) {
         return cls.getAnnotationByName("Component").flatMap(c -> {
@@ -409,13 +436,8 @@ public class BeanRegistryResolver implements FrameworkResolver {
                 if (!v.isBlank()) values.add(v.trim());
             }
         }
-        if (ann.isArrayInitializerExpr()) {
-            for (Expression expr : ann.asArrayInitializerExpr().getValues()) {
-                if (expr instanceof StringLiteralExpr) {
-                    values.add(((StringLiteralExpr) expr).getValue());
-                }
-            }
-        }
+        // isArrayInitializerExpr() on an AnnotationExpr is always false —
+        // AnnotationExpr is not a subtype of ArrayInitializerExpr. Dead code removed.
         return values;
     }
 
