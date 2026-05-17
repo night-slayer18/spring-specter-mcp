@@ -119,28 +119,27 @@ public final class GraphDiff {
             List<SpecterEdge> addedEdges, List<SpecterEdge> removedEdges,
             SpecterGraph liveGraph) {
 
-        Set<String> directlyChangedIds = new HashSet<>();
-        for (SpecterNode n : added) directlyChangedIds.add(n.id());
+        Set<String> directlyChangedIds = HashSet.newHashSet(added.size() + removed.size() + changed.size() + 4);
+        for (SpecterNode n : added)   directlyChangedIds.add(n.id());
         for (SpecterNode n : removed) directlyChangedIds.add(n.id());
         for (SpecterNode n : changed) directlyChangedIds.add(n.id());
 
-        Set<String> impacted = new HashSet<>();
+        // Use adjacency-index lookups — O(degree) per changed node, not O(total_edges)
+        Set<String> impacted = HashSet.newHashSet(64);
         for (String changedId : directlyChangedIds) {
-            // Any node connected to the changed node via INJECTS or CALLS
-            for (SpecterEdge edge : liveGraph.allEdges()) {
-                if (edge.sourceId().equals(changedId) && !directlyChangedIds.contains(edge.targetId())) {
+            for (SpecterEdge edge : liveGraph.getOutgoingEdges(changedId)) {
+                if (!directlyChangedIds.contains(edge.targetId()))
                     impacted.add(edge.targetId());
-                }
-                if (edge.targetId().equals(changedId) && !directlyChangedIds.contains(edge.sourceId())) {
+            }
+            for (SpecterEdge edge : liveGraph.getIncomingEdges(changedId)) {
+                if (!directlyChangedIds.contains(edge.sourceId()))
                     impacted.add(edge.sourceId());
-                }
             }
         }
 
         return impacted.stream()
                 .map(id -> liveGraph.getNode(id).map(n -> new ImpactedComponent(
-                        n.id(), n.name(), n.type(),
-                        "dependency of changed node"))
+                        n.id(), n.name(), n.type(), "dependency of changed node"))
                         .orElse(null))
                 .filter(Objects::nonNull)
                 .toList();

@@ -8,37 +8,58 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
+/**
+ * Core graph data structure for the Specter Runtime Context Simulator.
+ *
+ * <p>Edge lookup is O(1) amortized via dual adjacency-list indexes
+ * ({@code outgoing} and {@code incoming}) maintained on every mutation.
+ * All collections are backed by {@link ConcurrentHashMap} for safe
+ * concurrent access during parallel Pass 2 resolver execution.
+ */
 public class SpecterGraph {
 
-    private final Map<String, SpecterNode> nodes = new ConcurrentHashMap<>();
-    private final Set<SpecterEdge> edges = ConcurrentHashMap.newKeySet();
+    private final Map<String, SpecterNode> nodes = new ConcurrentHashMap<>(256);
+
+    // Dual adjacency indexes — O(1) outgoing/incoming edge lookup
+    private final Map<String, Set<SpecterEdge>> outgoing = new ConcurrentHashMap<>(256);
+    private final Map<String, Set<SpecterEdge>> incoming = new ConcurrentHashMap<>(256);
+
+    // Full edge set for serialization and iteration
+    private final Set<SpecterEdge> edges = ConcurrentHashMap.newKeySet(1024);
+
+    // ── Mutation ─────────────────────────────────────────────────────────
 
     public void addNode(SpecterNode node) {
         nodes.put(node.id(), node);
     }
 
+    public void addEdge(SpecterEdge edge) {
+        if (edges.add(edge)) {
+            outgoing.computeIfAbsent(edge.sourceId(), k -> ConcurrentHashMap.newKeySet()).add(edge);
+            incoming.computeIfAbsent(edge.targetId(), k -> ConcurrentHashMap.newKeySet()).add(edge);
+        }
+    }
+
+    public void addEdge(String sourceId, String targetId, EdgeType type) {
+        addEdge(new SpecterEdge(sourceId, targetId, type));
+    }
+
+    // ── Queries ──────────────────────────────────────────────────────────
+
     public Optional<SpecterNode> getNode(String id) {
         return Optional.ofNullable(nodes.get(id));
     }
 
-    public void addEdge(SpecterEdge edge) {
-        edges.add(edge);
-    }
-
-    public void addEdge(String sourceId, String targetId, EdgeType type) {
-        edges.add(new SpecterEdge(sourceId, targetId, type));
-    }
-
+    /** O(1) — backed by adjacency index. */
     public List<SpecterEdge> getOutgoingEdges(String nodeId) {
-        return edges.stream()
-                .filter(e -> e.sourceId().equals(nodeId))
-                .collect(Collectors.toList());
+        Set<SpecterEdge> set = outgoing.get(nodeId);
+        return set == null ? List.of() : List.copyOf(set);
     }
 
+    /** O(1) — backed by adjacency index. */
     public List<SpecterEdge> getIncomingEdges(String nodeId) {
-        return edges.stream()
-                .filter(e -> e.targetId().equals(nodeId))
-                .collect(Collectors.toList());
+        Set<SpecterEdge> set = incoming.get(nodeId);
+        return set == null ? List.of() : List.copyOf(set);
     }
 
     public List<SpecterNode> findNodesByType(NodeType type) {
@@ -47,14 +68,31 @@ public class SpecterGraph {
                 .collect(Collectors.toList());
     }
 
-    public Optional<SpecterNode> findNodeByName(String name) {
+    /**
+     * Returns all nodes whose {@code name} equals the given value.
+     * Prefer this over {@link #findNodeByName} when duplicate simple
+     * names across packages are possible.
+     */
+    public List<SpecterNode> findNodesByName(String name) {
         return nodes.values().stream()
                 .filter(n -> n.name().equals(name))
-                .findFirst();
+                .toList();
     }
 
+    /**
+     * Returns the first node matching the given name.
+     * Delegates to {@link #findNodesByName}; use that method when
+     * multiple matches are expected.
+     */
+    public Optional<SpecterNode> findNodeByName(String name) {
+        List<SpecterNode> matches = findNodesByName(name);
+        return matches.isEmpty() ? Optional.empty() : Optional.of(matches.getFirst());
+    }
+
+    // ── Graph traversal ──────────────────────────────────────────────────
+
     public Set<String> blastRadius(String startNodeId, int maxDepth) {
-        Set<String> visited = new HashSet<>();
+        Set<String> visited = HashSet.newHashSet(64);
         Deque<String> queue = new ArrayDeque<>();
         Deque<Integer> depthQueue = new ArrayDeque<>();
         queue.add(startNodeId);
@@ -64,23 +102,17 @@ public class SpecterGraph {
         while (!queue.isEmpty()) {
             String current = queue.poll();
             int depth = depthQueue.poll();
-
             if (depth >= maxDepth) continue;
 
-            // Outgoing edges (downstream dependencies)
             for (SpecterEdge edge : getOutgoingEdges(current)) {
-                String target = edge.targetId();
-                if (visited.add(target)) {
-                    queue.add(target);
+                if (visited.add(edge.targetId())) {
+                    queue.add(edge.targetId());
                     depthQueue.add(depth + 1);
                 }
             }
-
-            // Incoming edges (upstream dependents — what depends on this)
             for (SpecterEdge edge : getIncomingEdges(current)) {
-                String source = edge.sourceId();
-                if (visited.add(source)) {
-                    queue.add(source);
+                if (visited.add(edge.sourceId())) {
+                    queue.add(edge.sourceId());
                     depthQueue.add(depth + 1);
                 }
             }
@@ -89,13 +121,10 @@ public class SpecterGraph {
         return visited;
     }
 
-    public int nodeCount() {
-        return nodes.size();
-    }
+    // ── Metrics ──────────────────────────────────────────────────────────
 
-    public int edgeCount() {
-        return edges.size();
-    }
+    public int nodeCount() { return nodes.size(); }
+    public int edgeCount()  { return edges.size(); }
 
     public Collection<SpecterNode> allNodes() {
         return Collections.unmodifiableCollection(nodes.values());
@@ -105,26 +134,52 @@ public class SpecterGraph {
         return Collections.unmodifiableSet(edges);
     }
 
+    // ── Mutation — clear / remove ─────────────────────────────────────────
+
     public void clear() {
         nodes.clear();
         edges.clear();
+        outgoing.clear();
+        incoming.clear();
     }
 
+    /**
+     * Removes all nodes sourced from the given file and cleans up
+     * every edge that referenced those nodes from both adjacency indexes.
+     */
     public void removeNodesForFile(Path file) {
         String filePath = file.toAbsolutePath().toString();
         List<String> toRemove = nodes.values().stream()
-                .filter(n -> {
-                    String src = n.metadata().get("sourceFile");
-                    return src != null && src.equals(filePath);
-                })
+                .filter(n -> filePath.equals(n.metadata().get("sourceFile")))
                 .map(SpecterNode::id)
                 .toList();
 
         for (String id : toRemove) {
             nodes.remove(id);
-            edges.removeIf(e -> e.sourceId().equals(id) || e.targetId().equals(id));
+
+            // Clean outgoing adjacency: remove edges from this node
+            Set<SpecterEdge> outEdges = outgoing.remove(id);
+            if (outEdges != null) {
+                for (SpecterEdge e : outEdges) {
+                    edges.remove(e);
+                    Set<SpecterEdge> inSet = incoming.get(e.targetId());
+                    if (inSet != null) inSet.remove(e);
+                }
+            }
+
+            // Clean incoming adjacency: remove edges to this node
+            Set<SpecterEdge> inEdges = incoming.remove(id);
+            if (inEdges != null) {
+                for (SpecterEdge e : inEdges) {
+                    edges.remove(e);
+                    Set<SpecterEdge> outSet = outgoing.get(e.sourceId());
+                    if (outSet != null) outSet.remove(e);
+                }
+            }
         }
     }
+
+    // ── Persistence ───────────────────────────────────────────────────────
 
     public void saveToFile(Path outputPath) throws IOException {
         GraphSerializer.saveToFile(this, outputPath);
