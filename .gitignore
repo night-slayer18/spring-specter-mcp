@@ -12,7 +12,7 @@ out/
 .DS_Store
 Thumbs.db
 
-]logs/
+logs/
 *.log
 *.tmp
 *.temp

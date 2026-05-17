@@ -1020,24 +1020,26 @@ public class SpecterMcpTools {
               "Example: 'take_snapshot before-auth-refactor' then diff after changes.")
     public Map<String, Object> takeSnapshot(
             @ToolParam(description = "Label for this snapshot (e.g., 'before-refactor', 'main-branch')") String label) {
+        Optional<Path> projectRoot = resolveProjectRoot();
+        if (projectRoot.isEmpty()) {
+            return Map.of("error", true, "message",
+                    "Could not locate project root (no pom.xml/build.gradle found above source root)");
+        }
         try {
             var graph = activeEngine.get().getGraph();
             GraphDiff.GraphSnapshot snapshot = activeEngine.get().snapshot(label);
 
-            Path snapshotsDir = resolveProjectRoot().resolve(".specter-cache/snapshots");
+            Path snapshotsDir = projectRoot.get().resolve(".specter-cache/snapshots");
             Files.createDirectories(snapshotsDir);
             Path snapshotFile = snapshotsDir.resolve(label + ".json");
 
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("label", snapshot.label());
-            data.put("capturedAt", snapshot.capturedAt().toString());
-            data.put("nodeCount", snapshot.nodes().size());
-            data.put("edgeCount", snapshot.edges().size());
+            // saveSnapshot embeds label + capturedAt in JSON for accurate timestamp recovery
+            GraphSerializer.saveSnapshot(graph, label, snapshotFile);
 
-            GraphSerializer.saveToFile(graph, snapshotFile);
-
-            return Map.of("saved", true, "label", label, "nodeCount",
-                    snapshot.nodes().size(), "edgeCount", snapshot.edges().size(),
+            return Map.of("saved", true, "label", label,
+                    "nodeCount", snapshot.nodes().size(),
+                    "edgeCount", snapshot.edges().size(),
+                    "capturedAt", snapshot.capturedAt().toString(),
                     "path", snapshotFile.toString());
         } catch (IOException e) {
             log.warn("Failed to save snapshot '{}'", label, e);
@@ -1053,8 +1055,13 @@ public class SpecterMcpTools {
     public Map<String, Object> diffSnapshots(
             @ToolParam(description = "Label of the 'before' snapshot") String beforeLabel,
             @ToolParam(description = "Label of the 'after' snapshot (or 'current' for live graph)") String afterLabel) {
+        Optional<Path> projectRoot = resolveProjectRoot();
+        if (projectRoot.isEmpty()) {
+            return Map.of("error", true, "message",
+                    "Could not locate project root (no pom.xml/build.gradle found above source root)");
+        }
         try {
-            Path snapshotsDir = resolveProjectRoot().resolve(".specter-cache/snapshots");
+            Path snapshotsDir = projectRoot.get().resolve(".specter-cache/snapshots");
             var liveGraph = activeEngine.get().getGraph();
 
             GraphDiff.GraphSnapshot before = loadSnapshot(snapshotsDir, beforeLabel);
@@ -1101,8 +1108,10 @@ public class SpecterMcpTools {
           description = "Lists all available graph snapshots with their labels and capture timestamps.")
     public List<Map<String, Object>> listSnapshots() {
         List<Map<String, Object>> snapshots = new ArrayList<>();
+        Optional<Path> projectRoot = resolveProjectRoot();
+        if (projectRoot.isEmpty()) return snapshots;
         try {
-            Path snapshotsDir = resolveProjectRoot().resolve(".specter-cache/snapshots");
+            Path snapshotsDir = projectRoot.get().resolve(".specter-cache/snapshots");
             if (!Files.exists(snapshotsDir)) return snapshots;
 
             try (var files = Files.list(snapshotsDir)) {
@@ -1116,18 +1125,21 @@ public class SpecterMcpTools {
                             }
                         })
                         .forEach(file -> {
-                            String label = file.getFileName().toString()
-                                    .replace(".json", "");
+                            String snapshotLabel = file.getFileName().toString().replace(".json", "");
                             try {
                                 var graph = GraphSerializer.loadFromFile(file);
+                                GraphSerializer.SnapshotMetadata meta =
+                                        GraphSerializer.loadSnapshotMetadata(file);
                                 snapshots.add(Map.of(
-                                        "label", label,
+                                        "label", snapshotLabel,
                                         "nodeCount", graph.nodeCount(),
                                         "edgeCount", graph.edgeCount(),
-                                        "lastModified", Files.getLastModifiedTime(file).toString()
+                                        "capturedAt", meta != null
+                                                ? meta.capturedAt().toString()
+                                                : Files.getLastModifiedTime(file).toString()
                                 ));
                             } catch (IOException e) {
-                                snapshots.add(Map.of("label", label, "error", true));
+                                snapshots.add(Map.of("label", snapshotLabel, "error", true));
                             }
                         });
             }
@@ -1141,12 +1153,17 @@ public class SpecterMcpTools {
         Path file = snapshotsDir.resolve(label + ".json");
         if (!Files.exists(file)) return null;
         var graph = GraphSerializer.loadFromFile(file);
+        // Recover actual capture timestamp from embedded metadata
+        GraphSerializer.SnapshotMetadata meta = GraphSerializer.loadSnapshotMetadata(file);
+        Instant capturedAt = (meta != null)
+                ? meta.capturedAt()
+                : Instant.ofEpochMilli(Files.getLastModifiedTime(file).toMillis());
         return new GraphDiff.GraphSnapshot(
                 graph.allNodes().stream()
                         .collect(java.util.stream.Collectors.toMap(
                                 com.specter.core.graph.SpecterNode::id, n -> n)),
                 Set.copyOf(graph.allEdges()),
-                Instant.now(),
+                capturedAt,
                 label
         );
     }
@@ -1560,15 +1577,22 @@ public class SpecterMcpTools {
         return m;
     }
 
-    private Path resolveProjectRoot() {
+    /**
+     * Walks upward from the configured source root to find the nearest
+     * directory containing a {@code pom.xml} or {@code build.gradle}.
+     *
+     * @return the project root, or {@link Optional#empty()} if none found
+     *         (prevents falling through to the filesystem root).
+     */
+    private Optional<Path> resolveProjectRoot() {
         Path p = Path.of(sourceRootPath).toAbsolutePath();
-        while (p != null && !Files.exists(p.resolve("pom.xml"))
-                && !Files.exists(p.resolve("build.gradle"))) {
-            Path parent = p.getParent();
-            if (parent == null) break;
-            p = parent;
+        while (p != null) {
+            if (Files.exists(p.resolve("pom.xml")) || Files.exists(p.resolve("build.gradle"))) {
+                return Optional.of(p);
+            }
+            p = p.getParent();
         }
-        return p;
+        return Optional.empty();
     }
 
     private int findLayer(List<String> layers, String moduleName) {
