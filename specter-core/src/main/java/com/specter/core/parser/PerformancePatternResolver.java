@@ -344,20 +344,25 @@ public class PerformancePatternResolver implements FrameworkResolver {
     }
 
     private void resolveCacheableGaps() {
+        // Build O(1) lookup index: classFQN -> [methodKeys] instead of O(N×M) nested loop.
+        // The old endsWith(".svcClass") guard was also unreachable when both sides are FQNs.
+        Map<String, List<String>> classMethods = new HashMap<>();
+        for (String methodKey : serviceReturnTypes.keySet()) {
+            int dotIdx = methodKey.lastIndexOf('.');
+            if (dotIdx < 0) continue;
+            classMethods.computeIfAbsent(methodKey.substring(0, dotIdx), k -> new ArrayList<>())
+                        .add(methodKey);
+        }
+
         for (SpecterEdge edge : graph.allEdges()) {
             if (edge.type() != EdgeType.CALLS) continue;
             String targetId = edge.targetId();
             if (!targetId.startsWith("class:")) continue;
             String targetClass = targetId.substring("class:".length());
 
-            for (var entry : serviceReturnTypes.entrySet()) {
-                String methodKey = entry.getKey();
-                int dotIdx = methodKey.lastIndexOf('.');
-                if (dotIdx < 0) continue;
-                String svcClass = methodKey.substring(0, dotIdx);
-                if (targetClass.equals(svcClass) || targetClass.endsWith("." + svcClass)) {
-                    serviceCallCount.merge(methodKey, 1, Integer::sum);
-                }
+            List<String> methods = classMethods.get(targetClass);  // O(1) lookup
+            if (methods != null) {
+                methods.forEach(mk -> serviceCallCount.merge(mk, 1, Integer::sum));
             }
         }
 

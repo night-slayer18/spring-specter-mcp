@@ -186,7 +186,7 @@ public class MessagingResolver implements FrameworkResolver {
         String methodName = call.getNameAsString();
 
         boolean isSend = "send".equals(methodName);
-        boolean isConvertAndSend = "convertAndSend".equals(methodName) || "convertAndSend".equals(methodName);
+        boolean isConvertAndSend = "convertAndSend".equals(methodName);
 
         if (!isSend && !isConvertAndSend) return null;
 

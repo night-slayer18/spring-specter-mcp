@@ -89,15 +89,23 @@ public class OpenApiResolver implements FrameworkResolver {
                                 });
                     }
 
-                    // Check @ApiResponse
+                    // @ApiResponse is always NormalAnnotationExpr — never SingleMemberAnnotationExpr
                     for (var ann : method.getAnnotations()) {
-                        if ("ApiResponse".equals(ann.getNameAsString()) && ann instanceof SingleMemberAnnotationExpr sma) {
-                            StringLiteralExpr sle = sma.getMemberValue().asStringLiteralExpr();
-                            String code = sle.getValue();
-                            graph.allNodes().stream()
-                                    .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT
-                                            && method.getNameAsString().equals(n.metadata().get("methodName")))
-                                    .forEach(ep -> graph.addNode(ep.withMetadata("responseCode", code)));
+                        if ("ApiResponse".equals(ann.getNameAsString())
+                                && ann instanceof NormalAnnotationExpr na) {
+                            na.getPairs().stream()
+                                    .filter(p -> "responseCode".equals(p.getNameAsString())
+                                            || "code".equals(p.getNameAsString()))
+                                    .findFirst()
+                                    .ifPresent(p -> {
+                                        String code = p.getValue().toString().replaceAll("\"", "");
+                                        graph.allNodes().stream()
+                                                .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT
+                                                        && method.getNameAsString().equals(
+                                                                n.metadata().get("methodName")))
+                                                .forEach(ep -> graph.addNode(
+                                                        ep.withMetadata("responseCode", code)));
+                                    });
                         }
                     }
                 })
