@@ -11,6 +11,7 @@ import com.specter.core.watcher.SourceChangeTracker;
 import com.specter.core.watcher.SourceChangeTracker.ChangeSet;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
@@ -239,7 +240,18 @@ public class SpecterAnalysisEngine {
      * Incremental analysis — only re-processes files changed since the last run.
      */
     public ChangeSet analyzeIncremental(Path sourceRoot, Set<String> activeProfiles) throws IOException {
-        SourceChangeTracker tracker = new SourceChangeTracker(sourceRoot);
+        // SourceChangeTracker must be rooted at the project root (where pom.xml lives),
+        // not the source root (src/main/java). Otherwise fingerprints go to the wrong directory
+        // and every incremental call is treated as the first run (all files "added").
+        Path projectRoot = sourceRoot;
+        while (projectRoot != null
+                && !Files.exists(projectRoot.resolve("pom.xml"))
+                && !Files.exists(projectRoot.resolve("build.gradle"))) {
+            projectRoot = projectRoot.getParent();
+        }
+        if (projectRoot == null) projectRoot = sourceRoot;
+
+        SourceChangeTracker tracker = new SourceChangeTracker(projectRoot);
         ChangeSet changes = tracker.computeChanges(sourceRoot);
 
         if (!changes.hasChanges()) {

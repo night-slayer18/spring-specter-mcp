@@ -1,5 +1,7 @@
 package com.specter.server.remediation;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.specter.core.graph.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -157,26 +159,33 @@ public class RemediationEngine {
         return parseClaudeResponse(response.body());
     }
 
+    /**
+     * Replaces the fragile regex parser with Jackson.
+     *
+     * <p>Claude's API returns: {@code {"content": [{"type": "text", "text": "..."}]}}
+     * The regex approach fails on escaped quotes, multi-block responses, and tool-use
+     * responses. Jackson handles all these cases correctly.
+     */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private String parseClaudeResponse(String responseBody) {
-        // Simple JSON extraction — find the text content in Claude's response format
-        Pattern contentPattern = Pattern.compile(
-                "\"text\"\\s*:\\s*\"([^\"]*(?:\\\\.[^\"]*)*)\"", Pattern.DOTALL);
-        Matcher m = contentPattern.matcher(responseBody);
-
-        StringBuilder result = new StringBuilder();
-        while (m.find()) {
-            String text = m.group(1)
-                    .replace("\\n", "\n")
-                    .replace("\\\"", "\"")
-                    .replace("\\\\", "\\");
-            result.append(text);
+        try {
+            JsonNode root = MAPPER.readTree(responseBody);
+            StringBuilder result = new StringBuilder();
+            for (JsonNode block : root.path("content")) {
+                if ("text".equals(block.path("type").asText())) {
+                    result.append(block.path("text").asText());
+                }
+            }
+            if (result.isEmpty()) {
+                log.warn("No text content blocks in Claude response; raw: {}", responseBody);
+                return "No text content in response";
+            }
+            return result.toString();
+        } catch (Exception e) {
+            log.error("Failed to parse Claude response", e);
+            return "Parse error: " + e.getMessage();
         }
-
-        if (result.isEmpty()) {
-            return "Unable to parse Claude's response. Raw: " + responseBody;
-        }
-
-        return result.toString();
     }
 
     private List<String> extractCodeSnippets(String response) {
