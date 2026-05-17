@@ -71,6 +71,7 @@ public class AopProxyResolver implements FrameworkResolver {
 
     @Override
     public void resolve(Path sourceRoot) throws IOException {
+        classAopStereotypes.clear();   // prevent state accumulation across re-analyses
         // Phase A: Discover which classes have AOP-annotated methods
         try (Stream<Path> javaFiles = Files.walk(sourceRoot)) {
             javaFiles

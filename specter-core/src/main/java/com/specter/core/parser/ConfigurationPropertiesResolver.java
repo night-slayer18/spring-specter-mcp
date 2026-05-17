@@ -35,6 +35,8 @@ public class ConfigurationPropertiesResolver implements FrameworkResolver {
 
     @Override
     public void resolve(Path sourceRoot) throws IOException {
+        propertyValues.clear();   // prevent cross-module contamination
+
         // Parse property files
         parsePropertyFiles(sourceRoot);
 

@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * Core graph data structure for the Specter Runtime Context Simulator.
@@ -27,10 +26,26 @@ public class SpecterGraph {
     // Full edge set for serialization and iteration
     private final Set<SpecterEdge> edges = ConcurrentHashMap.newKeySet(1024);
 
+    // Secondary NodeType index — O(1) findNodesByType
+    private final Map<NodeType, Set<SpecterNode>> byType = new ConcurrentHashMap<>();
+
     // ── Mutation ─────────────────────────────────────────────────────────
 
+    /**
+     * Adds or merges a node. If a node with the same ID already exists,
+     * incoming metadata is merged onto the existing node (incoming wins
+     * on key conflict). This prevents concurrent Pass 2b resolvers from
+     * silently clobbering each other's metadata.
+     */
     public void addNode(SpecterNode node) {
-        nodes.put(node.id(), node);
+        nodes.merge(node.id(), node, (existing, incoming) -> {
+            SpecterNode merged = existing;
+            for (var entry : incoming.metadata().entrySet()) {
+                merged = merged.withMetadata(entry.getKey(), entry.getValue());
+            }
+            return merged;
+        });
+        byType.computeIfAbsent(node.type(), k -> ConcurrentHashMap.newKeySet()).add(node);
     }
 
     public void addEdge(SpecterEdge edge) {
@@ -62,10 +77,10 @@ public class SpecterGraph {
         return set == null ? List.of() : List.copyOf(set);
     }
 
+    /** O(1) — backed by NodeType secondary index. */
     public List<SpecterNode> findNodesByType(NodeType type) {
-        return nodes.values().stream()
-                .filter(n -> n.type() == type)
-                .collect(Collectors.toList());
+        Set<SpecterNode> set = byType.get(type);
+        return set == null ? List.of() : List.copyOf(set);
     }
 
     /**
@@ -141,6 +156,7 @@ public class SpecterGraph {
         edges.clear();
         outgoing.clear();
         incoming.clear();
+        byType.clear();
     }
 
     /**
@@ -155,7 +171,13 @@ public class SpecterGraph {
                 .toList();
 
         for (String id : toRemove) {
-            nodes.remove(id);
+            SpecterNode removedNode = nodes.remove(id);
+
+            // Remove from NodeType index
+            if (removedNode != null) {
+                Set<SpecterNode> typeSet = byType.get(removedNode.type());
+                if (typeSet != null) typeSet.remove(removedNode);
+            }
 
             // Clean outgoing adjacency: remove edges from this node
             Set<SpecterEdge> outEdges = outgoing.remove(id);
