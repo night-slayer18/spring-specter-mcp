@@ -14,8 +14,8 @@ import com.specter.core.registry.BeanRegistry.BeanMetadata;
 import com.specter.core.registry.BeanRegistry.ConditionalMetadata;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -64,7 +64,11 @@ public class BeanRegistryResolver implements FrameworkResolver {
 
     @Override
     public void resolve(Path sourceRoot) throws IOException {
-        Set<String> scanPackages = new LinkedHashSet<>();
+        // Load application properties for @ConditionalOnProperty evaluation
+        Map<String, String> appProperties = loadApplicationProperties(sourceRoot);
+        log.debug("Loaded {} application properties for conditional evaluation", appProperties.size());
+
+        Set<String> scanPackages  = new LinkedHashSet<>();
         Set<String> excludeFilters = new LinkedHashSet<>();
         Set<String> includeFilters = new LinkedHashSet<>();
 
@@ -117,7 +121,7 @@ public class BeanRegistryResolver implements FrameworkResolver {
 
                     if (!isStereotypedOrBean(cls)) continue;
 
-                    registerStereotypeBean(cls, className, filePackage, file);
+                    registerStereotypeBean(cls, className, filePackage, file, appProperties);
                 }
             } catch (IOException e) {
                 log.debug("Failed to parse during scan: {}", file, e);
@@ -203,7 +207,8 @@ public class BeanRegistryResolver implements FrameworkResolver {
     // ── Stereotype registration ─────────────────────────────────────────
 
     private void registerStereotypeBean(ClassOrInterfaceDeclaration cls,
-                                         String className, String classPackage, Path file) {
+                                         String className, String classPackage,
+                                         Path file, Map<String, String> appProperties) {
         String beanName = resolveBeanName(cls);
         NodeType stereotype = classifyStereotype(cls);
 
@@ -266,6 +271,17 @@ public class BeanRegistryResolver implements FrameworkResolver {
                 log.debug("Skipping bean {} — profile {} not in active profiles {}",
                         className, meta.activeProfiles(), activeProfiles);
                 return;
+            }
+        }
+
+        // Evaluate @ConditionalOnProperty against loaded application properties
+        for (ConditionalMetadata cond : meta.conditions()) {
+            if (cond.type() == ConditionalMetadata.ConditionalType.ON_PROPERTY) {
+                if (!evaluateConditionalOnProperty(cond, appProperties)) {
+                    log.debug("Skipping bean {} — @ConditionalOnProperty({}) not satisfied",
+                            className, cond.key());
+                    return;
+                }
             }
         }
 
@@ -467,5 +483,99 @@ public class BeanRegistryResolver implements FrameworkResolver {
                     .filter(p -> p.toString().endsWith(".java"))
                     .toList();
         }
+    }
+
+    // ── Application property loading ─────────────────────────────────────
+
+    /**
+     * Scans the source tree for {@code application.properties} and
+     * {@code application.yml} / {@code application.yaml} files and merges
+     * key-value pairs into a single map for {@code @ConditionalOnProperty} evaluation.
+     */
+    private Map<String, String> loadApplicationProperties(Path sourceRoot) {
+        Map<String, String> props = HashMap.newHashMap(32);
+        if (!Files.isDirectory(sourceRoot)) return props;
+        try {
+            Files.walkFileTree(sourceRoot, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    String name = file.getFileName().toString();
+                    if ("application.properties".equals(name)) {
+                        loadPropertiesFile(file, props);
+                    } else if ("application.yml".equals(name) || "application.yaml".equals(name)) {
+                        loadYamlFile(file, props);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            log.warn("Failed to scan application properties: {}", e.getMessage());
+        }
+        return props;
+    }
+
+    private void loadPropertiesFile(Path file, Map<String, String> target) {
+        Properties p = new Properties();
+        try (var reader = Files.newBufferedReader(file)) {
+            p.load(reader);
+            p.stringPropertyNames().forEach(key -> target.put(key, p.getProperty(key)));
+            log.debug("Loaded {} properties from {}", p.size(), file);
+        } catch (IOException e) {
+            log.debug("Failed to load properties file: {}", file);
+        }
+    }
+
+    /** Simple line-by-line YAML loader for flat {@code key: value} pairs. */
+    private void loadYamlFile(Path file, Map<String, String> target) {
+        try {
+            Files.lines(file).forEach(line -> {
+                String trimmed = line.trim();
+                if (trimmed.isBlank() || trimmed.startsWith("#")) return;
+                int colonIdx = trimmed.indexOf(':');
+                if (colonIdx <= 0) return;
+                String key   = trimmed.substring(0, colonIdx).trim();
+                String value = trimmed.substring(colonIdx + 1).trim();
+                int commentIdx = value.indexOf(" #");
+                if (commentIdx > 0) value = value.substring(0, commentIdx).trim();
+                if (value.startsWith("\"") && value.endsWith("\"") && value.length() > 1)
+                    value = value.substring(1, value.length() - 1);
+                if (!key.isBlank()) target.put(key, value);
+            });
+        } catch (IOException e) {
+            log.debug("Failed to load YAML file: {}", file);
+        }
+    }
+
+    // ── @ConditionalOnProperty evaluation ────────────────────────────────
+
+    /**
+     * Evaluates a single {@code @ConditionalOnProperty} condition against
+     * the loaded application properties.
+     *
+     * <p>{@code @ConditionalOnClass} and {@code @ConditionalOnMissingBean} are
+     * not evaluated — they require a live classloader and remain as metadata only.
+     */
+    private boolean evaluateConditionalOnProperty(ConditionalMetadata cond,
+                                                   Map<String, String> props) {
+        String key           = cond.key();
+        String expectedValue = cond.expectedValue();
+
+        boolean matchIfMissing = expectedValue != null
+                && expectedValue.toLowerCase().contains("matchifmissing=true");
+
+        String actualValue = props.get(key);
+        if (actualValue == null) return matchIfMissing;
+
+        if (expectedValue == null || expectedValue.isBlank() || matchIfMissing) {
+            return !actualValue.isBlank()
+                    && !"false".equalsIgnoreCase(actualValue)
+                    && !"0".equals(actualValue);
+        }
+
+        return expectedValue.equalsIgnoreCase(actualValue);
     }
 }
