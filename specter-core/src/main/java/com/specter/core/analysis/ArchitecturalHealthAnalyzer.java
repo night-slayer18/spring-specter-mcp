@@ -41,11 +41,14 @@ public class ArchitecturalHealthAnalyzer {
         dimensions.put("CONTRACT_HEALTH", contractHealth);
         dimensions.put("ARCHITECTURE_RULES_HEALTH", architectureRulesHealth);
 
+        // Use mapToInt().average() — division happens on a double inside Math.round(),
+        // avoiding the integer-truncation bug of the previous (sum)/7 formula.
         int overall = (int) Math.round(
-                dependencyHealth.score() + securityHealth.score()
-                + resilienceHealth.score() + testHealth.score()
-                + observabilityHealth.score() + contractHealth.score()
-                + architectureRulesHealth.score()) / 7;
+                dimensions.values().stream()
+                        .mapToInt(DimensionScore::score)
+                        .average()
+                        .orElse(100.0));
+
 
         List<RiskScore> criticalIssues = new ArrayList<>();
         for (DimensionScore ds : dimensions.values()) {
