@@ -44,53 +44,46 @@ public class ProjectRegistry {
     /**
      * Registers a project and triggers async analysis.
      *
-     * <p>The {@code projectId} is derived from a SHA-256 prefix of the
-     * normalized source-root path — calling this method twice with the
-     * same {@code sourceRoot} is therefore idempotent and returns the
-     * existing {@link ProjectContext} without spawning a second analysis thread.
-     *
-     * @param sourceRoot  absolute path to the project source root
-     * @param displayName optional human-readable name; defaults to directory name
+     * <p>Uses {@code computeIfAbsent} so concurrent calls with the same
+     * {@code sourceRoot} are atomic — only one analysis thread is ever spawned.
      */
     public ProjectContext registerProject(String sourceRoot, String displayName) throws IOException {
         Path root = Path.of(sourceRoot).toAbsolutePath();
-        // Deterministic ID — deduplication actually works
         String projectId = GraphSerializer.projectHash(root);
         String name = displayName != null && !displayName.isBlank()
                 ? displayName : root.getFileName().toString();
 
-        // Idempotent: return existing context if already registered
-        ProjectContext existing = projects.get(projectId);
-        if (existing != null) {
-            log.debug("Project '{}' already registered — returning existing context", name);
-            return existing;
-        }
-
-        Path graphCache = cacheDir.resolve("graph-" + projectId + ".json");
-        SpecterAnalysisEngine engine = new SpecterAnalysisEngine(null, Set.of());
-
-        ProjectContext ctx = new ProjectContext(projectId, name, root, engine,
-                Instant.now(), AnalysisStatus.PENDING);
-        projects.put(projectId, ctx);
-
-        Thread.startVirtualThread(() -> {
+        // computeIfAbsent is atomic — no check-then-act race
+        return projects.computeIfAbsent(projectId, id -> {
             try {
-                projects.put(projectId, new ProjectContext(
-                        projectId, name, root, engine, Instant.now(), AnalysisStatus.ANALYZING));
-                engine.analyze(root);
-                GraphSerializer.saveToFile(engine.getGraph(), graphCache);
-                projects.put(projectId, new ProjectContext(
-                        projectId, name, root, engine, Instant.now(), AnalysisStatus.READY));
-                log.info("Project '{}' analysis complete — {} nodes, {} edges",
-                        name, engine.getGraph().nodeCount(), engine.getGraph().edgeCount());
+                SpecterAnalysisEngine engine = new SpecterAnalysisEngine(null, Set.of());
+                ProjectContext ctx = new ProjectContext(id, name, root, engine,
+                        Instant.now(), AnalysisStatus.PENDING);
+                Thread.startVirtualThread(() -> runAnalysis(id, name, root, engine));
+                return ctx;
             } catch (IOException e) {
-                log.error("Failed to analyze project '{}'", name, e);
-                projects.put(projectId, new ProjectContext(
-                        projectId, name, root, engine, Instant.now(), AnalysisStatus.FAILED));
+                throw new RuntimeException("Failed to create analysis engine for " + root, e);
             }
         });
+    }
 
-        return projects.get(projectId);
+    private void runAnalysis(String projectId, String name, Path root,
+                              SpecterAnalysisEngine engine) {
+        Path graphCache = cacheDir.resolve("graph-" + projectId + ".json");
+        try {
+            projects.put(projectId, new ProjectContext(
+                    projectId, name, root, engine, Instant.now(), AnalysisStatus.ANALYZING));
+            engine.analyze(root);
+            GraphSerializer.saveToFile(engine.getGraph(), graphCache);
+            projects.put(projectId, new ProjectContext(
+                    projectId, name, root, engine, Instant.now(), AnalysisStatus.READY));
+            log.info("Project '{}' analysis complete — {} nodes, {} edges",
+                    name, engine.getGraph().nodeCount(), engine.getGraph().edgeCount());
+        } catch (IOException e) {
+            log.error("Failed to analyze project '{}'", name, e);
+            projects.put(projectId, new ProjectContext(
+                    projectId, name, root, engine, Instant.now(), AnalysisStatus.FAILED));
+        }
     }
 
     public ProjectContext getProject(String projectId) {
@@ -101,3 +94,4 @@ public class ProjectRegistry {
         return Collections.unmodifiableCollection(projects.values());
     }
 }
+

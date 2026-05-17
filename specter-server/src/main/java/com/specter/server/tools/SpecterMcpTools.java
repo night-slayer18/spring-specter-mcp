@@ -39,7 +39,7 @@ public class SpecterMcpTools {
 
     private final AtomicReference<SpecterAnalysisEngine> activeEngine;
     private final ArchitectureRuleEngine ruleEngine;
-    private final String sourceRootPath;
+    private final AtomicReference<String> activeSourceRoot;  // updated on switchProject
     private final ProjectRegistry projectRegistry;
     private final RemediationEngine remediationEngine;
 
@@ -49,7 +49,7 @@ public class SpecterMcpTools {
                             RemediationEngine remediationEngine) {
         this.activeEngine = new AtomicReference<>(engine);
         this.ruleEngine = new ArchitectureRuleEngine(() -> activeEngine.get().getGraph());
-        this.sourceRootPath = sourceRootPath;
+        this.activeSourceRoot = new AtomicReference<>(sourceRootPath);
         this.projectRegistry = projectRegistry;
         this.remediationEngine = remediationEngine;
     }
@@ -241,7 +241,7 @@ public class SpecterMcpTools {
         Map<String, Object> response = new LinkedHashMap<>();
 
         try {
-            Path rootPath = Path.of(sourceRootPath).toAbsolutePath();
+            Path rootPath = Path.of(activeSourceRoot.get()).toAbsolutePath();
             // Walk up to find .git directory
             Path repoRoot = rootPath;
             while (repoRoot != null && !repoRoot.resolve(".git").toFile().exists()) {
@@ -304,7 +304,7 @@ public class SpecterMcpTools {
     public Map<String, Object> refreshAnalysis() {
         Map<String, Object> response = new LinkedHashMap<>();
         try {
-            Path sourceRoot = Path.of(sourceRootPath).toAbsolutePath();
+            Path sourceRoot = Path.of(activeSourceRoot.get()).toAbsolutePath();
             ChangeSet changes = activeEngine.get().analyzeIncremental(sourceRoot, Set.of());
             response.put("analyzed", true);
             response.put("added", changes.added().size());
@@ -798,6 +798,7 @@ public class SpecterMcpTools {
             response.put("message", "Project not found or not ready: " + projectId);
         } else {
             activeEngine.set(ctx.engine());
+            activeSourceRoot.set(ctx.sourceRoot().toString());  // update active source root
             response.put("projectId", ctx.projectId());
             response.put("displayName", ctx.displayName());
             response.put("status", ctx.status().name());
@@ -1161,7 +1162,8 @@ public class SpecterMcpTools {
         return new GraphDiff.GraphSnapshot(
                 graph.allNodes().stream()
                         .collect(java.util.stream.Collectors.toMap(
-                                com.specter.core.graph.SpecterNode::id, n -> n)),
+                                com.specter.core.graph.SpecterNode::id, n -> n,
+                                (a, b) -> b)),  // merge on duplicate IDs — last wins
                 Set.copyOf(graph.allEdges()),
                 capturedAt,
                 label
@@ -1585,7 +1587,7 @@ public class SpecterMcpTools {
      *         (prevents falling through to the filesystem root).
      */
     private Optional<Path> resolveProjectRoot() {
-        Path p = Path.of(sourceRootPath).toAbsolutePath();
+        Path p = Path.of(activeSourceRoot.get()).toAbsolutePath();
         while (p != null) {
             if (Files.exists(p.resolve("pom.xml")) || Files.exists(p.resolve("build.gradle"))) {
                 return Optional.of(p);
@@ -1604,12 +1606,10 @@ public class SpecterMcpTools {
 
     private static Map<String, Object> nodeToMap(SpecterNode node) {
         Map<String, Object> m = new LinkedHashMap<>();
-        if (node instanceof SpecterNode(var id, var name, var type, var metadata)) {
-            m.put("nodeId", id);
-            m.put("name", name);
-            m.put("type", type.name());
-            m.put("metadata", metadata);
-        }
+        m.put("nodeId", node.id());
+        m.put("name", node.name());
+        m.put("type", node.type().name());
+        m.put("metadata", node.metadata());
         return m;
     }
 }
