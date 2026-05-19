@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -666,15 +667,18 @@ public class SpecterMcpTools {
     public List<Map<String, Object>> findResilienceGaps() {
         var graph = activeEngine.get().getGraph();
         List<Map<String, Object>> gaps = new ArrayList<>();
+        Set<String> resiliencePatterns = Set.of("RETRY", "CIRCUIT_BREAKER", "BULKHEAD", "TIME_LIMITER");
 
         for (SpecterEdge edge : graph.allEdges()) {
             if (edge.type() != EdgeType.CALLS_REMOTE) continue;
             graph.getNode(edge.sourceId()).ifPresent(source -> {
                 boolean hasResilience = graph.getOutgoingEdges(source.id()).stream()
                         .anyMatch(e -> e.type() == EdgeType.CALLS && graph.getNode(e.targetId())
-                                .map(n -> n.type() == NodeType.PROXY
-                                        && n.metadata().getOrDefault("PROXY_STEREOTYPE", "")
-                                                .contains("RETRY"))
+                                .map(n -> {
+                                    if (n.type() != NodeType.PROXY) return false;
+                                    String stereotype = n.metadata().getOrDefault("PROXY_STEREOTYPE", "");
+                                    return resiliencePatterns.stream().anyMatch(stereotype::contains);
+                                })
                                 .orElse(false));
                 if (!hasResilience) {
                     graph.getNode(edge.targetId()).ifPresent(target -> {
@@ -1561,6 +1565,420 @@ public class SpecterMcpTools {
         result.put("aotFriendlyComponents", aotFriendlyCount);
         result.put("issues", issues);
         return result;
+    }
+
+    @Tool(name = "find_by_annotation",
+            description = "Finds all classes, methods, and fields annotated with a given annotation. " +
+                    "Returns matching nodes with their location metadata. Essential for discovering " +
+                    "cross-cutting concerns without scanning source files. " +
+                    "Example: 'find_by_annotation @Transactional' returns all transactional methods.")
+    public Map<String, Object> findByAnnotation(
+            @ToolParam(description = "Annotation name with or without @ prefix, e.g. 'Transactional' or '@Transactional'") String annotationName) {
+        String cleanName = annotationName.startsWith("@") ? annotationName.substring(1) : annotationName;
+        var graph = activeEngine.get().getGraph();
+        List<Map<String, Object>> matches = new ArrayList<>();
+
+        for (SpecterNode node : graph.allNodes()) {
+            Set<String> annotations = parseAnnotationList(node.metadata().get("annotations"));
+            if (annotations.contains(cleanName)) {
+                Map<String, Object> m = nodeToMap(node);
+                m.put("annotations", annotations);
+                matches.add(m);
+            }
+        }
+
+        // Group by type for clearer output
+        Map<String, Long> byType = matches.stream()
+                .collect(Collectors.groupingBy(m -> (String) m.get("type"), Collectors.counting()));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("annotation", cleanName);
+        response.put("totalMatches", matches.size());
+        response.put("byType", byType);
+        response.put("matches", matches);
+        return response;
+    }
+
+    @Tool(name = "find_dead_components",
+            description = "Finds production components (SERVICE, REPOSITORY, COMPONENT, CONTROLLER) " +
+                    "that have zero incoming edges from other production code — potentially dead code. " +
+                    "Excludes test-only components and configuration classes. " +
+                    "Example: detect services that are never injected anywhere.")
+    public Map<String, Object> findDeadComponents() {
+        var graph = activeEngine.get().getGraph();
+        List<Map<String, Object>> dead = new ArrayList<>();
+
+        Set<String> productionReferenced = new HashSet<>();
+        for (SpecterEdge edge : graph.allEdges()) {
+            if (edge.type() == EdgeType.INJECTS || edge.type() == EdgeType.CALLS
+                    || edge.type() == EdgeType.IMPLEMENTS || edge.type() == EdgeType.EXTENDS
+                    || edge.type() == EdgeType.RESOLVES_TO || edge.type() == EdgeType.MEASURES
+                    || edge.type() == EdgeType.TRACES || edge.type() == EdgeType.SECURED_BY) {
+                productionReferenced.add(edge.targetId());
+            }
+        }
+
+        for (SpecterNode node : graph.allNodes()) {
+            NodeType type = node.type();
+            if (type != NodeType.SERVICE && type != NodeType.REPOSITORY
+                    && type != NodeType.COMPONENT && type != NodeType.CONTROLLER) continue;
+            if (!productionReferenced.contains(node.id())) {
+                Map<String, Object> m = nodeToMap(node);
+                boolean tested = graph.getIncomingEdges(node.id()).stream()
+                        .anyMatch(e -> e.type() == EdgeType.TESTS);
+                m.put("tested", tested);
+                m.put("file", node.metadata().getOrDefault("sourceFile", "unknown"));
+                dead.add(m);
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("totalDead", dead.size());
+        response.put("deadComponents", dead);
+        if (dead.size() > 10) {
+            response.put("message", dead.size() + " dead components found — significant refactoring opportunity");
+        }
+        return response;
+    }
+
+    @Tool(name = "trace_request_flow",
+            description = "Traces the full HTTP request execution chain from a controller endpoint " +
+                    "through all called services down to repository methods. Returns the ordered " +
+                    "call chain with method-level resolution. Essential for understanding request processing. " +
+                    "Example: trace how GET /api/orders actually processes a request.")
+    public Map<String, Object> traceRequestFlow(
+            @ToolParam(description = "HTTP method (GET, POST, PUT, DELETE, PATCH)") String httpMethod,
+            @ToolParam(description = "URL path, e.g. '/api/orders'") String path) {
+        var graph = activeEngine.get().getGraph();
+        List<Map<String, Object>> chain = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+
+        // Find the endpoint node
+        SpecterNode endpoint = graph.allNodes().stream()
+                .filter(n -> n.type() == NodeType.CONTROLLER_ENDPOINT
+                        && httpMethod.equalsIgnoreCase(n.metadata().get("httpVerb"))
+                        && path.equals(n.metadata().get("path")))
+                .findFirst().orElse(null);
+
+        if (endpoint == null) {
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("found", false);
+            response.put("message", "No endpoint found for " + httpMethod + " " + path);
+            return response;
+        }
+
+        // Trace forward from endpoint
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(endpoint.id());
+        visited.add(endpoint.id());
+
+        while (!queue.isEmpty()) {
+            String currentId = queue.poll();
+            graph.getNode(currentId).ifPresent(node -> {
+                if (node.type() == NodeType.CONTROLLER_ENDPOINT) return; // skip endpoint itself
+                Map<String, Object> step = new LinkedHashMap<>();
+                step.put("nodeId", node.id());
+                step.put("name", node.name());
+                step.put("type", node.type().name());
+                step.put("file", node.metadata().getOrDefault("sourceFile", ""));
+                chain.add(step);
+            });
+
+            for (SpecterEdge edge : graph.getOutgoingEdges(currentId)) {
+                if ((edge.type() == EdgeType.CALLS || edge.type() == EdgeType.INJECTS
+                        || edge.type() == EdgeType.IMPLEMENTS)
+                        && visited.add(edge.targetId())) {
+                    queue.add(edge.targetId());
+                }
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("found", true);
+        response.put("endpoint", httpMethod + " " + path);
+        response.put("chainLength", chain.size());
+        response.put("callChain", chain);
+
+        // Identify transaction boundaries in the chain
+        List<String> transactionalNodes = chain.stream()
+                .filter(step -> {
+                    String nodeId = (String) step.get("nodeId");
+                    var node = graph.getNode(nodeId);
+                    return node.map(n -> parseAnnotationList(n.metadata().get("annotations"))
+                            .contains("Transactional")).orElse(false);
+                })
+                .map(step -> (String) step.get("name"))
+                .toList();
+        if (!transactionalNodes.isEmpty()) {
+            response.put("transactionalBoundaries", transactionalNodes);
+        }
+
+        return response;
+    }
+
+    @Tool(name = "find_string_usage",
+            description = "Searches the analyzed codebase for source lines containing a pattern. " +
+                    "Supports substring match (default) or regex when prefixed with 'regex:'. " +
+                    "Returns file, line number, and matched line content. " +
+                    "Example: 'find_string_usage Deadlock' or 'find_string_usage regex:catch\\s*\\('")
+    public Map<String, Object> findStringUsage(
+            @ToolParam(description = "String to search for, or prefix with 'regex:' for regex matching") String pattern) {
+        boolean useRegex = pattern.startsWith("regex:");
+        String search = useRegex ? pattern.substring(6).trim() : pattern;
+        java.util.regex.Pattern regex = useRegex ? java.util.regex.Pattern.compile(search) : null;
+
+        String sourceRoot = activeSourceRoot.get();
+        List<Map<String, Object>> results = new ArrayList<>();
+        Set<String> seenFiles = new HashSet<>();
+        java.util.regex.Pattern compiled = regex;
+
+        try (var files = Files.walk(Path.of(sourceRoot))) {
+            files.forEach(file -> {
+                if (!Files.isRegularFile(file) || !file.toString().endsWith(".java")) return;
+                try {
+                    var linesList = Files.readAllLines(file);
+                    for (int i = 0; i < linesList.size(); i++) {
+                        String line = linesList.get(i);
+                        boolean match = useRegex ? compiled.matcher(line).find() : line.contains(search);
+                        if (match) {
+                            if (results.size() >= 500) break;
+                            seenFiles.add(file.toString());
+                            Map<String, Object> m = new LinkedHashMap<>();
+                            m.put("file", file.toString());
+                            m.put("line", i + 1);
+                            m.put("content", line.strip());
+                            results.add(m);
+                        }
+                    }
+                } catch (IOException ignored) {}
+            });
+        } catch (IOException e) {
+            log.error("Failed to scan source for pattern '{}'", pattern, e);
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("pattern", pattern);
+        response.put("totalMatches", results.size());
+        response.put("filesContaining", seenFiles.size());
+        response.put("matches", results);
+        return response;
+    }
+
+    @Tool(name = "find_deprecated_usage",
+            description = "Finds all classes, methods, and fields in the codebase that are " +
+                    "annotated with @Deprecated. Returns the deprecated components and where " +
+                    "they're called from. Essential for upgrade planning and API evolution. " +
+                    "Example: find every deprecated method still being used in production code.")
+    public Map<String, Object> findDeprecatedUsage() {
+        var graph = activeEngine.get().getGraph();
+        List<Map<String, Object>> deprecated = new ArrayList<>();
+        List<Map<String, Object>> callers = new ArrayList<>();
+
+        for (SpecterNode node : graph.allNodes()) {
+            Set<String> annotations = parseAnnotationList(node.metadata().get("annotations"));
+            if (annotations.contains("Deprecated")) {
+                Map<String, Object> m = nodeToMap(node);
+                m.put("sourceFile", node.metadata().getOrDefault("sourceFile", "unknown"));
+                deprecated.add(m);
+
+                for (SpecterEdge edge : graph.getIncomingEdges(node.id())) {
+                    if (edge.type() == EdgeType.CALLS) {
+                        graph.getNode(edge.sourceId()).ifPresent(caller -> {
+                            Map<String, Object> cm = new LinkedHashMap<>();
+                            cm.put("callerName", caller.name());
+                            cm.put("callerId", caller.id());
+                            cm.put("callerType", caller.type().name());
+                            cm.put("deprecatedTarget", node.name());
+                            cm.put("deprecatedTargetId", node.id());
+                            callers.add(cm);
+                        });
+                    }
+                }
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("totalDeprecated", deprecated.size());
+        response.put("totalCallers", callers.size());
+        response.put("deprecatedComponents", deprecated);
+        response.put("activeCallers", callers);
+        if (deprecated.isEmpty()) {
+            response.put("message", "No @Deprecated components found — codebase is clean");
+        } else {
+            response.put("message", deprecated.size() + " deprecated components found, " +
+                    callers.size() + " active callers — migration needed");
+        }
+        return response;
+    }
+
+    @Tool(name = "trace_data_flow",
+            description = "Traces how data flows from a source (entity field, DTO field, " +
+                    "or method parameter) through transformations to its sinks. Tracks " +
+                    "MAPS_TO (entity↔DTO mapping), ACCEPTS/RETURNS (API input/output), " +
+                    "and CALLS edges. Example: trace where the 'email' field on UserDto ends up.")
+    public Map<String, Object> traceDataFlow(
+            @ToolParam(description = "Source class or field name to trace from, e.g. 'UserDto' or 'User.email'") String sourceName,
+            @ToolParam(description = "Maximum traversal depth (default 5)") int maxDepth) {
+        var graph = activeEngine.get().getGraph();
+        List<Map<String, Object>> flow = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+
+        // Find starting node(s) by name
+        List<SpecterNode> starts = graph.allNodes().stream()
+                .filter(n -> n.name().equals(sourceName) || n.name().contains(sourceName))
+                .toList();
+
+        if (starts.isEmpty()) {
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("found", false);
+            response.put("message", "No node matching '" + sourceName + "' found in graph");
+            return response;
+        }
+
+        for (SpecterNode start : starts) {
+            Deque<SpecterNode> queue = new ArrayDeque<>();
+            queue.add(start);
+            visited.add(start.id());
+
+            int depth = 0;
+            while (!queue.isEmpty() && depth < maxDepth) {
+                int size = queue.size();
+                final int stepDepth = depth + 1;
+                for (int i = 0; i < size; i++) {
+                    SpecterNode current = queue.poll();
+                    if (current == null) continue;
+
+                    for (SpecterEdge edge : graph.getOutgoingEdges(current.id())) {
+                        if (edge.type() == EdgeType.MAPS_TO
+                                || edge.type() == EdgeType.CALLS
+                                || edge.type() == EdgeType.RETURNS
+                                || edge.type() == EdgeType.ACCEPTS) {
+                            graph.getNode(edge.targetId()).ifPresent(target -> {
+                                if (visited.add(target.id())) {
+                                    queue.add(target);
+                                    Map<String, Object> step = new LinkedHashMap<>();
+                                    step.put("sourceType", current.type().name());
+                                    step.put("source", current.name());
+                                    step.put("edgeType", edge.type().name());
+                                    step.put("targetType", target.type().name());
+                                    step.put("target", target.name());
+                                    step.put("depth", stepDepth);
+                                    flow.add(step);
+                                }
+                            });
+                        }
+                    }
+                }
+                depth++;
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("found", true);
+        response.put("source", sourceName);
+        response.put("maxDepth", maxDepth);
+        response.put("totalPaths", flow.size());
+        response.put("flow", flow);
+
+        Set<String> sinks = flow.stream()
+                .filter(s -> "RETURNS".equals(s.get("edgeType")) || "MAPS_TO".equals(s.get("edgeType")))
+                .map(s -> (String) s.get("target"))
+                .collect(Collectors.toSet());
+        if (!sinks.isEmpty()) response.put("sinks", sinks);
+
+        return response;
+    }
+
+    @Tool(name = "audit_thread_safety",
+            description = "Scans SERVICE, COMPONENT, and CONTROLLER singleton beans for potential " +
+                    "thread-safety issues: non-thread-safe collection fields, unsynchronized " +
+                    "mutable state, @Autowired prototype-scoped beans. Returns risk-scored findings. " +
+                    "Example: find singletons that could cause race conditions under concurrent load.")
+    public Map<String, Object> auditThreadSafety() {
+        String sourceRoot = activeSourceRoot.get();
+        List<Map<String, Object>> findings = new ArrayList<>();
+        Set<String> nonThreadSafeTypes = Set.of(
+                "HashMap", "ArrayList", "HashSet", "LinkedList", "ArrayDeque",
+                "StringBuilder", "SimpleDateFormat", "DateFormat", "Random",
+                "int", "long", "double", "float", "boolean", "Integer", "Long",
+                "Double", "Float", "Boolean", "String", "Date"
+        );
+
+        var graph = activeEngine.get().getGraph();
+        Set<String> singletonClasses = new HashSet<>();
+        for (SpecterNode node : graph.allNodes()) {
+            if (node.type() == NodeType.SERVICE || node.type() == NodeType.COMPONENT
+                    || node.type() == NodeType.CONTROLLER) {
+                singletonClasses.add(node.name());
+            }
+        }
+
+        try (var files = Files.walk(Path.of(sourceRoot))) {
+            files.filter(Files::isRegularFile)
+                    .filter(p -> p.toString().endsWith(".java"))
+                    .forEach(file -> {
+                        try {
+                            List<String> lines = Files.readAllLines(file);
+                            String currentClass = null;
+                            boolean inSingleton = false;
+
+                            for (int i = 0; i < lines.size(); i++) {
+                                String line = lines.get(i).strip();
+
+                                java.util.regex.Matcher classMatcher =
+                                        java.util.regex.Pattern.compile(
+                                                "class\\s+(\\w+)\\s*(extends|implements|\\{)",
+                                                java.util.regex.Pattern.CASE_INSENSITIVE)
+                                                .matcher(line);
+                                if (classMatcher.find()) {
+                                    currentClass = classMatcher.group(1);
+                                    inSingleton = singletonClasses.contains(currentClass);
+                                }
+
+                                if (inSingleton && currentClass != null) {
+                                    for (String nts : nonThreadSafeTypes) {
+                                        java.util.regex.Pattern fieldPattern =
+                                                java.util.regex.Pattern.compile(
+                                                        "private\\s+(?!final)(\\w+\\s+)*" + nts +
+                                                        "(<[^>]+>)?\\s+\\w+",
+                                                        java.util.regex.Pattern.CASE_INSENSITIVE);
+                                        if (fieldPattern.matcher(line).find()) {
+                                            Map<String, Object> f = new LinkedHashMap<>();
+                                            f.put("className", currentClass);
+                                            f.put("fieldType", nts);
+                                            f.put("line", i + 1);
+                                            f.put("declaration", line);
+                                            f.put("risk", nts.equals("HashMap") ? "HIGH" :
+                                                    nts.matches("int|long|double|float|boolean|String|Date") ? "LOW" : "MEDIUM");
+                                            findings.add(f);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (IOException ignored) {}
+                    });
+        } catch (IOException e) {
+            log.error("Thread safety audit failed", e);
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("totalFindings", findings.size());
+        response.put("findings", findings);
+        response.put("singletonsAnalyzed", singletonClasses.size());
+        response.put("riskBreakdown", findings.stream()
+                .collect(Collectors.groupingBy(f -> (String) f.get("risk"), Collectors.counting())));
+        if (findings.isEmpty()) {
+            response.put("message", "No thread-safety issues detected in " + singletonClasses.size() + " singletons");
+        }
+        return response;
+    }
+
+    private static Set<String> parseAnnotationList(String raw) {
+        if (raw == null || raw.isEmpty()) return Set.of();
+        return Arrays.stream(raw.split("[,\\s]+"))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toSet());
     }
 
     private String gradeScore(int score) {

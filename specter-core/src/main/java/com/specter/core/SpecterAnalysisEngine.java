@@ -9,6 +9,10 @@ import com.specter.core.registry.BeanRegistry;
 import com.specter.core.registry.BeanRegistry.BeanMetadata;
 import com.specter.core.watcher.SourceChangeTracker;
 import com.specter.core.watcher.SourceChangeTracker.ChangeSet;
+import com.github.javaparser.ParserConfiguration;
+import com.github.javaparser.StaticJavaParser;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -43,6 +47,9 @@ public class SpecterAnalysisEngine {
     /** Volatile ensures visibility across virtual threads without synchronization overhead. */
     private volatile AnalysisProgressListener progressListener;
 
+    @Autowired(required = false)
+    private MeterRegistry meterRegistry;
+
     /**
      * Sequential resolvers — must run in order (dependency graph matters):
      * SpringDependencyResolver adds CALLS/INJECTS edges that AopProxyResolver
@@ -56,6 +63,13 @@ public class SpecterAnalysisEngine {
      * Run concurrently on virtual threads after sequential resolvers complete.
      */
     private final List<FrameworkResolver> parallelResolvers;
+
+    /**
+     * Enrichment resolvers — depend on nodes created by the parallel resolvers
+     * (e.g., OpenApiResolver needs CONTROLLER_ENDPOINT nodes from WebMvcResolver).
+     * Run sequentially after the parallel phase completes.
+     */
+    private final List<FrameworkResolver> enrichmentResolvers;
 
     public SpecterAnalysisEngine() throws IOException {
         this(null, Set.of());
@@ -75,8 +89,15 @@ public class SpecterAnalysisEngine {
         this.indexWriter = new SpecterIndexWriter();
         this.indexSearcher = new SpecterIndexSearcher(indexWriter.getDirectory());
         this.registry = new BeanRegistry();
-        this.sequentialResolvers = buildSequentialResolvers(classesRoot);
-        this.parallelResolvers   = buildParallelResolvers();
+
+        // Lock JavaParser to modern Java BEFORE any resolver touches the config
+        ParserConfiguration parserConfig = new ParserConfiguration();
+        parserConfig.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_25);
+        StaticJavaParser.setConfiguration(parserConfig);
+
+        this.sequentialResolvers  = buildSequentialResolvers(classesRoot);
+        this.parallelResolvers    = buildParallelResolvers();
+        this.enrichmentResolvers  = buildEnrichmentResolvers();
     }
 
     private List<FrameworkResolver> buildSequentialResolvers(Path classesRoot) {
@@ -100,13 +121,23 @@ public class SpecterAnalysisEngine {
                 new MessagingResolver(graph),
                 new SecurityFilterChainResolver(graph),
                 new ConfigurationPropertiesResolver(graph),
-                new OpenApiResolver(graph),
                 new ServiceCallResolver(graph),
                 new TestCoverageResolver(graph),
                 new ObservabilityResolver(graph),
                 new PerformancePatternResolver(graph),
                 new DatabaseSchemaResolver(graph),
                 new GraalVmCompatibilityResolver(graph)
+        );
+    }
+
+    /**
+     * Enrichment resolvers — depend on nodes created by the parallel resolvers
+     * (e.g., OpenApiResolver needs CONTROLLER_ENDPOINT nodes from WebMvcResolver).
+     * Run sequentially after the parallel phase completes.
+     */
+    private List<FrameworkResolver> buildEnrichmentResolvers() {
+        return List.of(
+                new OpenApiResolver(graph)
         );
     }
 
@@ -143,12 +174,29 @@ public class SpecterAnalysisEngine {
         // ═══ Pass 2: Parallel resolvers (independent, no ordering constraints)
         runResolversInParallel(parallelResolvers, sourceRoot);
 
+        // ═══ Pass 3: Enrichment resolvers (depend on parallel phase output)
+        for (FrameworkResolver resolver : enrichmentResolvers) {
+            try {
+                resolver.resolve(sourceRoot);
+                log.info("{} enrichment complete", resolver.name());
+            } catch (Exception e) {
+                log.error("Enrichment resolver '{}' failed — continuing", resolver.name(), e);
+            }
+        }
+
         // ═══ Index ═══════════════════════════════════════════════════════
         reindex();
         notifyComplete();
 
         log.info("Analysis complete. Graph: {} nodes, {} edges. Registry: {} beans.",
                 graph.nodeCount(), graph.edgeCount(), registry.size());
+
+        if (meterRegistry != null) {
+            meterRegistry.gauge("specter.graph.nodes", graph.nodeCount());
+            meterRegistry.gauge("specter.graph.edges", graph.edgeCount());
+            meterRegistry.gauge("specter.beans.active", registry.size());
+            meterRegistry.counter("specter.analysis.completed").increment();
+        }
     }
 
     /**
@@ -157,8 +205,12 @@ public class SpecterAnalysisEngine {
      * abort the pipeline. All resolvers are guaranteed to complete before this method returns.
      */
     private void runResolversInParallel(List<FrameworkResolver> resolvers, Path sourceRoot) {
+        // JavaParser uses ThreadLocal configuration — propagate from main thread to virtual threads
+        ParserConfiguration sharedConfig = StaticJavaParser.getParserConfiguration();
+
         List<Callable<Void>> tasks = resolvers.stream()
                 .map(resolver -> (Callable<Void>) () -> {
+                    StaticJavaParser.setConfiguration(sharedConfig);
                     try {
                         resolver.resolve(sourceRoot);
                         log.info("{} complete — {} nodes, {} edges",
@@ -307,6 +359,15 @@ public class SpecterAnalysisEngine {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.error("Incremental Pass 2 interrupted", e);
+        }
+
+        // Enrichment resolvers (post-parallel)
+        for (FrameworkResolver resolver : enrichmentResolvers) {
+            try {
+                resolver.resolve(sourceRoot);
+            } catch (Exception e) {
+                log.error("Enrichment resolver '{}' failed during incremental", resolver.name(), e);
+            }
         }
 
         reindex();

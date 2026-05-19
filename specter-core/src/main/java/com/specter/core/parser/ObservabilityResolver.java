@@ -93,6 +93,32 @@ public class ObservabilityResolver implements FrameworkResolver {
         boolean hasMeterRegistry = hasMeterRegistryInjection(cls);
         boolean hasTimed = false;
 
+        // Check class-level @Timed (e.g., @Timed("specter.api"))
+        for (AnnotationExpr ann : cls.getAnnotations()) {
+            if (!ann.getNameAsString().equals("Timed")) continue;
+            hasTimed = true;
+            String metricName = className + ".allMethods";
+            if (ann instanceof SingleMemberAnnotationExpr sma
+                    && sma.getMemberValue().isStringLiteralExpr()) {
+                metricName = sma.getMemberValue().asStringLiteralExpr().getValue();
+            } else if (ann instanceof NormalAnnotationExpr na) {
+                for (MemberValuePair pair : na.getPairs()) {
+                    if ("value".equals(pair.getNameAsString())
+                            && pair.getValue().isStringLiteralExpr()) {
+                        metricName = pair.getValue().asStringLiteralExpr().getValue();
+                    }
+                }
+            }
+            String metricNodeId = "metric:" + metricName;
+            SpecterNode metricNode = SpecterNode.of(metricNodeId, metricName, NodeType.METRIC)
+                    .withMetadata("measuredBy", className)
+                    .withMetadata("scope", "class");
+            graph.addNode(metricNode);
+            graph.addEdge(nodeId, metricNodeId, EdgeType.MEASURES);
+            break;
+        }
+
+        // Check method-level @Timed
         for (MethodDeclaration method : cls.getMethods()) {
             for (AnnotationExpr ann : method.getAnnotations()) {
                 if (!ann.getNameAsString().equals("Timed")) continue;

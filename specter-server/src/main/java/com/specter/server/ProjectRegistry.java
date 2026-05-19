@@ -2,6 +2,7 @@ package com.specter.server;
 
 import com.specter.core.SpecterAnalysisEngine;
 import com.specter.core.persistence.GraphSerializer;
+import io.micrometer.core.instrument.MeterRegistry;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -25,9 +26,15 @@ public class ProjectRegistry {
 
     private final ConcurrentHashMap<String, ProjectContext> projects = new ConcurrentHashMap<>();
     private final Path cacheDir;
+    private final MeterRegistry meterRegistry;
 
     public ProjectRegistry(Path cacheDir) {
+        this(cacheDir, null);
+    }
+
+    public ProjectRegistry(Path cacheDir, MeterRegistry meterRegistry) {
         this.cacheDir = cacheDir;
+        this.meterRegistry = meterRegistry;
     }
 
     public record ProjectContext(
@@ -79,6 +86,9 @@ public class ProjectRegistry {
                     projectId, name, root, engine, Instant.now(), AnalysisStatus.READY));
             log.info("Project '{}' analysis complete — {} nodes, {} edges",
                     name, engine.getGraph().nodeCount(), engine.getGraph().edgeCount());
+            if (meterRegistry != null) {
+                meterRegistry.counter("specter.projects.analyzed").increment();
+            }
         } catch (IOException e) {
             log.error("Failed to analyze project '{}'", name, e);
             projects.put(projectId, new ProjectContext(

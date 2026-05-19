@@ -3,6 +3,7 @@ package com.specter.server.streaming;
 import com.specter.core.AnalysisProgressListener;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer;
 import com.specter.core.graph.SpecterGraph;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 
@@ -12,19 +13,16 @@ import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Publishes graph analysis events over WebSocket STOMP.
- * All publish calls are non-blocking — failures are logged at WARN
- * and never propagate to abort an analysis pass.
+ * Publishes graph analysis events over WebSocket STOMP (when available).
+ * In STDIO mode SimpMessagingTemplate is absent — all publish calls
+ * degrade to no-ops logged at INFO.
  */
 @Slf4j
 @Component
 public class GraphChangePublisher implements AnalysisProgressListener {
 
-    private final SimpMessagingTemplate messagingTemplate;
-
-    public GraphChangePublisher(SimpMessagingTemplate messagingTemplate) {
-        this.messagingTemplate = messagingTemplate;
-    }
+    @Autowired(required = false)
+    private SimpMessagingTemplate messagingTemplate;
 
     @Override
     public void onProgress(String phase, int nodeCount, int edgeCount) {
@@ -40,6 +38,11 @@ public class GraphChangePublisher implements AnalysisProgressListener {
      * Called by SpecterAnalysisEngine after each analysis pass.
      */
     public void publishGraphSummary(SpecterGraph graph) {
+        if (messagingTemplate == null) {
+            log.info("WebSocket unavailable — skipping graph summary publish ({} nodes, {} edges)",
+                    graph.nodeCount(), graph.edgeCount());
+            return;
+        }
         try {
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("nodeCount", graph.nodeCount());
@@ -54,6 +57,11 @@ public class GraphChangePublisher implements AnalysisProgressListener {
      * Called when a health report is generated.
      */
     public void publishHealthUpdate(ArchitecturalHealthAnalyzer.HealthReport report) {
+        if (messagingTemplate == null) {
+            log.info("WebSocket unavailable — skipping health update publish (score: {})",
+                    report.overallScore());
+            return;
+        }
         try {
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("overallScore", report.overallScore());
@@ -67,6 +75,7 @@ public class GraphChangePublisher implements AnalysisProgressListener {
      * Called progressively during analysis to report progress.
      */
     public void publishAnalysisProgress(String phase, int nodeCount, int edgeCount) {
+        if (messagingTemplate == null) return;
         try {
             messagingTemplate.convertAndSend("/topic/analysis-progress",
                     Map.of("phase", phase, "nodes", nodeCount, "edges", edgeCount));

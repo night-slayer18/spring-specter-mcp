@@ -92,9 +92,15 @@ public class SpringDependencyResolver implements FrameworkResolver {
         NodeType nodeType = classifyStereotype(cls);
         String nodeId = "class:" + className;
 
+        // Collect all class-level annotations for cross-cutting tool queries
+        List<String> annotations = new ArrayList<>();
+        cls.getAnnotations().forEach(a -> annotations.add(a.getNameAsString()));
+        String annotationList = String.join(",", annotations);
+
         // Build node with registry metadata if available
         SpecterNode classNode = SpecterNode.of(nodeId, className, nodeType)
-                .withMetadata("sourceFile", file.toString());
+                .withMetadata("sourceFile", file.toString())
+                .withMetadata("annotations", annotationList);
 
         BeanMetadata meta = registry.getMetadata(className).orElse(null);
         if (meta != null) {
