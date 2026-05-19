@@ -3,6 +3,10 @@ package com.specter.server;
 import com.specter.core.SpecterAnalysisEngine;
 import com.specter.core.analysis.ArchitecturalHealthAnalyzer;
 import com.specter.server.streaming.GraphChangePublisher;
+import com.specter.server.tools.SpecterMcpTools;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.ai.tool.ToolCallbackProvider;
+import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
@@ -25,6 +29,13 @@ public class SpecterServerApplication {
         SpringApplication.run(SpecterServerApplication.class, args);
     }
 
+    @Bean
+    public ToolCallbackProvider specterToolCallbackProvider(SpecterMcpTools specterMcpTools) {
+        return MethodToolCallbackProvider.builder()
+                .toolObjects(specterMcpTools)
+                .build();
+    }
+
     @Bean(destroyMethod = "close")
     public SpecterAnalysisEngine analysisEngine(
             @Value("${specter.classes.root:#{null}}") String classesRootPath,
@@ -37,9 +48,9 @@ public class SpecterServerApplication {
     }
 
     @Bean
-    public ProjectRegistry projectRegistry() {
+    public ProjectRegistry projectRegistry(MeterRegistry meterRegistry) {
         Path cacheDir = Path.of(".specter-cache").toAbsolutePath();
-        return new ProjectRegistry(cacheDir);
+        return new ProjectRegistry(cacheDir, meterRegistry);
     }
 
     @Bean
@@ -47,29 +58,41 @@ public class SpecterServerApplication {
             SpecterAnalysisEngine engine,
             GraphChangePublisher publisher,
             @Value("${specter.source.root:./src}") String sourceRootPath,
-            @Value("${specter.active.profiles:}") String activeProfilesCsv) {
+            @Value("${specter.active.profiles:}") String activeProfilesCsv,
+            @Value("${spring.main.web-application-type:none}") String webAppType) {
         return args -> {
             Path sourceRoot = Path.of(sourceRootPath).toAbsolutePath();
-            if (!Files.isDirectory(sourceRoot)) {
+            if (Files.isDirectory(sourceRoot)) {
+                Set<String> activeProfiles = parseProfiles(activeProfilesCsv);
+                engine.setProgressListener(publisher);
+                log.info("Pre-warming analysis engine from: {} (profiles: {}, web-type: {})",
+                        sourceRoot, activeProfiles, webAppType);
+                engine.analyze(sourceRoot, activeProfiles);
+                log.info("Analysis engine ready — {} nodes, {} edges, {} active beans",
+                        engine.getGraph().nodeCount(),
+                        engine.getGraph().edgeCount(),
+                        engine.getRegistry().size());
+
+                ArchitecturalHealthAnalyzer healthAnalyzer =
+                        new ArchitecturalHealthAnalyzer(engine.getGraph());
+                var report = healthAnalyzer.analyze();
+                publisher.publishHealthUpdate(report);
+                log.info("Published initial health score: {}", report.overallScore());
+            } else {
                 log.warn("Source root does not exist: {}. Skipping startup analysis. " +
                         "Set SPECTER_SOURCE_ROOT to a valid directory.", sourceRoot);
-                return;
             }
-            Set<String> activeProfiles = parseProfiles(activeProfilesCsv);
-            engine.setProgressListener(publisher);
-            log.info("Pre-warming analysis engine from: {} (profiles: {})",
-                    sourceRoot, activeProfiles);
-            engine.analyze(sourceRoot, activeProfiles);
-            log.info("Analysis engine ready — {} nodes, {} edges, {} active beans",
-                    engine.getGraph().nodeCount(),
-                    engine.getGraph().edgeCount(),
-                    engine.getRegistry().size());
 
-            ArchitecturalHealthAnalyzer healthAnalyzer =
-                    new ArchitecturalHealthAnalyzer(engine.getGraph());
-            var report = healthAnalyzer.analyze();
-            publisher.publishHealthUpdate(report);
-            log.info("Published initial health score: {}", report.overallScore());
+            if ("none".equals(webAppType)) {
+                log.info("STDIO mode — blocking main thread to keep JVM alive");
+                try {
+                    new java.util.concurrent.CountDownLatch(1).await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            } else {
+                log.info("Web mode ({}) — web server threads keep JVM alive", webAppType);
+            }
         };
     }
 
